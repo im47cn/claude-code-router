@@ -1,162 +1,149 @@
-# 异步日志系统设计文档
+# 设计文档
 
-## 1. 概述
+## 概述
 
-本文档详细描述了 `claude-code-router` 异步请求日志系统的技术设计。该系统采用 Node.js `worker_threads` 将日志写入 MySQL 数据库的操作与主 API 请求处理线程分离，以保证 API 响应的低延迟。设计旨在满足存储完整请求/响应报文的需求，并确保日志记录的可靠性。
+本文档描述了 `claude-code-router` 异步请求日志系统的技术设计。该设计旨在实现一个可靠、高性能的日志记录解决方案，它将 API 请求和响应的详细信息持久化到 MySQL 数据库中。为了不影响主 API 的响应性能，所有数据库写入操作都将在一个独立的 Worker 线程中异步执行。此设计遵循 `.spec-workflow/specs/003-logging/requirements.md` 中定义的需求。
 
-## 2. 技术选型
+## 指导文档对齐
 
-* **异步机制**: Node.js `worker_threads` (内置模块)
-* **数据库**: MySQL
-* **数据库交互 (Worker)**: Prisma Client (或其他选定的 ORM/Query Builder)
-* **数据传递**: `worker.postMessage()` 和 `parentPort.on('message', ...)`
-* **数据格式**: JSON 对象
+### 技术标准 (tech.md)
 
-## 3. 架构设计
+- **数据库**: 采用 **MySQL** 存储请求日志，与 `tech.md` 的规定一致。将使用 **Prisma** 作为 ORM 进行交互。
+- **异步处理**: 利用 Node.js 原生的 **`worker_threads`** 来实现日志的异步写入，避免阻塞主服务线程，符合项目对高性能的要求。
+- **日志**: 主线程将使用 `pino` 进行应用级日志记录，而日志 Worker 将专注于将请求数据写入数据库。
 
-系统包含两个主要部分：
+### 项目结构 (structure.md)
 
-1. **主线程 (API Server)**: 负责收集日志数据并通过消息通道发送给 Worker Thread。
-2. **日志 Worker Thread**: 负责接收日志数据、连接数据库并将数据写入 `request_logs` 表。
+- **`src/workers/logger.worker.ts`**: 将创建此新文件，用于实现日志 Worker 的所有逻辑，包括数据库连接、数据排队和写入操作。
+- **`src/middleware/logging.ts`**: 将创建此新文件，用于实现 Fastify 的 `onResponse` 钩子。它负责收集请求/响应数据，进行脱敏，并通过 `postMessage` 发送给日志 Worker。
+- **`src/api/history.ts`**: 将创建此新文件，用于提供查询用户请求历史的 API 端点。
+- **`prisma/schema.prisma`**: 将修改此文件，添加 `RequestLog` 模型。
+
+## 代码重用分析
+
+### 要利用的现有组件
+
+- **Fastify 钩子机制**: 将利用 `onResponse` 钩子作为日志记录流程的触发点，确保在响应发送后捕获所有相关信息。
+- **数据库连接 (`src/db/client.ts`)**: 日志 Worker 将重用现有的 Prisma Client 实例或创建新实例来与数据库通信。
+- **配置系统 (`src/config/`)**: 数据库连接信息和其他相关配置将从主线程安全地传递给 Worker。
+
+### 集成点
+
+- **`onResponse` 钩子**: 这是日志系统与请求/响应生命周期的核心集成点。
+- **主线程与 Worker 通信**: 主线程通过 `worker.postMessage(logData)` 将日志数据发送给 Worker。
+- **Worker 与主线程通信**: Worker 可以通过 `parentPort.postMessage(status)` 向主线程报告其状态（如错误、队列大小）。
+- **`request_logs` 表**: 该表是查询用户历史记录的直接数据来源。
+
+## 架构
+
+系统将采用主线程与 Worker 线程分离的架构。主线程负责处理 API 请求，并在响应完成后将日志数据发送给 Worker。Worker 负责缓冲、批处理和持久化日志数据，从而将 I/O 延迟与主请求路径解耦。
+
+### 模块化设计原则
+
+- **单一职责**: `logger.worker.ts` 只负责接收日志数据并将其写入持久化存储。`logging.ts` 中间件只负责收集和分发数据。
+- **关注点分离**: 日志的收集（中间件）、传输（`postMessage`）和处理（Worker）是完全分离的。
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant MainThread as API Server (Fastify)
-    participant WorkerThread as Logger Worker
-    participant MySQL
+graph TD
+    A[API 请求] --> B[核心路由处理]
+    B --> C[生成 API 响应]
 
-    Client->>+MainThread: 发起 API 请求 (/v1/messages)
-    MainThread->>MainThread: API Key 认证 & 配额检查 (preHandler)
-    Note over MainThread: 记录 req.user_id, req.api_key_id
-    alt 配额超限
-        MainThread-->>Client: 返回 429 Too Many Requests
-        MainThread-)WorkerThread: 发送 'quota_exceeded' 日志消息
-    else 配额通过
-        MainThread->>MainThread: 处理请求 (路由, 调用 LLM)
-        MainThread-->>Client: 返回 API 响应 (Stream/JSON)
-        MainThread-)WorkerThread: 发送 'success'/'error' 日志消息 (onResponse 钩子)
+    subgraph 主线程
+        C -- onResponse hook --> D{日志中间件}
+        D --> E[收集与脱敏日志数据]
+        E --> F[postMessage to Worker]
+        M[启动应用] --> N[初始化 Logger Worker]
+        N --> O[监听 Worker 状态]
+        F --> O
     end
 
-    WorkerThread->>+MySQL: (批量) 写入 request_logs 表
-    MySQL-->>-WorkerThread: 写入确认
-    opt 写入失败
-        WorkerThread->>WorkerThread: 记录失败/重试/备用存储
+    subgraph Logger Worker Thread
+        direction TB
+        G[通过 on-message 接收数据] --> H[放入内部队列]
+        H --> I{批量写入 MySQL}
+        I -- 成功 --> J[完成]
+        I -- 失败 --> K{重试写入}
+        K -- 持续失败 --> L[写入本地备用 .jsonl 文件]
     end
 
-````
+    C --> Z[返回给客户端]
+```
 
-## 4. 主线程实现 (`src/index.ts`, `src/server.ts`)
+## 组件和接口
 
-1. **Worker 初始化**:
+### 组件1: LoggerMiddleware (`src/middleware/logging.ts`)
 
-      * 在服务器启动时 (`src/index.ts` 或 `src/server.ts` 的启动逻辑中)，创建一个新的 Worker Thread 实例。
-      * Worker 脚本路径指向 `src/workers/logger.worker.ts` (或编译后的 JS 文件)。
-      * 向 Worker 传递必要的初始化数据，例如数据库连接字符串（通过 `workerData`）。 **注意**: 避免直接传递完整的配置对象，只传递必要信息。
-      * 设置 Worker 的错误处理 (`worker.on('error', ...)`), 退出处理 (`worker.on('exit', ...)`), 和消息监听 (`worker.on('message', ...)` - 如果 Worker 需要向主线程发送状态)。
+- **目的**: 在 `onResponse` 钩子中运行，收集请求、响应和错误信息，进行脱敏处理，然后分发给 Logger Worker。
+- **接口**:
+  - `logRequest(request, reply, done)`: Fastify 的 `onResponse` 钩子函数。
+- **依赖**: Logger Worker 实例。
 
-2. **日志数据收集 (`onResponse` 钩子)**:
+### 组件2: LoggerWorker (`src/workers/logger.worker.ts`)
 
-      * 注册一个 Fastify `onResponse` 钩子。此钩子在响应发送完毕后触发。
-      * 在钩子中，收集以下信息:
-          * `userId`: 从 `request.user.id` 获取。
-          * `apiKeyId`: 从 `request.api_key_id` 获取。
-          * `requestTimestamp`: 请求开始时间（可在 `preHandler` 中记录）。
-          * `responseTimestamp`: 响应结束时间 ( `new Date()`)。
-          * `responseTimeMs`: `responseTimestamp - requestTimestamp`。
-          * `requestUrl`: `request.raw.url`。
-          * `requestMethod`: `request.raw.method`。
-          * `requestHeaders`: `request.headers` (JSON 格式，**需要考虑脱敏**，例如移除 `Authorization`, `Cookie` 等敏感头部)。
-          * `requestBody`: `request.body` (需要处理不同 Content-Type，确保获取到**完整的原始请求体**，可能需要自定义 `preHandler` 来存储原始 body)。
-          * `routedProvider`: 从 `request` 对象获取 (由 router 模块附加)。
-          * `routedModel`: 从 `request` 对象获取 (由 router 模块附加)。
-          * `statusCode`: `reply.raw.statusCode`。
-          * `status`: 根据 `statusCode` 判断为 `'success'` (2xx) 或 `'error'` (其他)。
-          * `errorMessage`: 如果发生错误，从 `reply.error` 或其他地方获取。
-          * `responseHeaders`: `reply.getHeaders()` (JSON 格式，**需要考虑脱敏**)。
-          * `responseBody`: **完整的响应体**。对于流式响应，需要特殊处理（见下文）。对于非流式响应，从 `payload` 参数（如果 `onSend` 钩子也用于收集）或通过拦截获取。
-          * `inputTokens`, `outputTokens`: 从请求处理过程中收集或从响应体中解析。
-      * **处理流式响应**:
-          * 在 `onSend` 钩子中，如果 `payload` 是 `ReadableStream`，使用 `tee()` 复制流。一个流返回给客户端，另一个流用于读取完整内容。
-          * 异步读取复制流的完整内容，完成后将其添加到日志数据对象中。这部分逻辑需要在 `onResponse` 钩子之后完成，但日志消息应包含一个唯一 ID 以便关联。或者，在 `onSend` 中启动读取，在 `onResponse` 中等待读取完成（可能增加 `onResponse` 延迟，需权衡）。**初步选择**: 在 `onResponse` 触发时再启动读取复制流（如果存在），读取完成后再发送给 Worker。
-      * **处理配额超限日志**: 在 `preHandler` 配额检查失败时，构造一个简化的日志对象（包含 `userId`, `apiKeyId`, `timestamp`, `status='quota_exceeded'`, `errorMessage`），直接发送给 Worker。
+- **目的**: 作为一个独立的后台线程运行，负责可靠地将日志数据写入数据库。
+- **接口**:
+  - `parentPort.on('message', (data) => ...)`: 监听来自主线程的日志数据。
+- **依赖**: PrismaClient, `fs/promises` (用于备用文件写入)。
+- **内部逻辑**:
+  - 维护一个内存队列以进行批处理。
+  - 实现一个循环，定期将队列中的数据写入 MySQL。
+  - 实现数据库写入的重试逻辑。
+  - 实现写入到本地文件系统的备用逻辑。
 
-3. **发送日志到 Worker**:
+### 组件3: 历史记录 API (`src/api/history.ts`)
 
-      * 将收集到的完整日志数据对象通过 `worker.postMessage(logData)` 发送给 Worker Thread。
-      * **错误处理**: 主线程的 `postMessage` 调用通常不会失败，但需要处理 Worker 意外退出的情况。
+- **目的**: 提供一个安全的 API 端点，允许用户查询自己的请求历史。
+- **接口**:
+  - `GET /api/history`: 支持按时间范围过滤和分页查询。
+- **依赖**: 认证中间件 (获取 `userId`), PrismaClient。
 
-## 5. 日志 Worker Thread 实现 (`src/workers/logger.worker.ts`)
+## 数据模型
 
-1. **初始化**:
+将在 `prisma/schema.prisma` 中定义 `RequestLog` 模型，对应数据库中的 `request_logs` 表。
 
-      * 引入 `worker_threads` (`parentPort`, `workerData`)。
-      * 引入 Prisma Client (或选择的 DB 库)。
-      * 从 `workerData` 获取数据库连接信息。
-      * **实例化 Prisma Client** (或其他 DB 连接池)。
-      * 设置一个内部队列（例如 `Array`) 用于缓冲日志消息。
-      * 设置批处理参数（例如 `BATCH_SIZE = 50`, `BATCH_INTERVAL = 1000`ms）。
-      * 设置一个定时器 (`batchTimer`) 用于按间隔处理。
+### `RequestLog`
 
-2. **消息监听**:
+- `id`: (自增主键)
+- `userId`: String (关联 `User`)
+- `apiKeyId`: String (关联 `ApiKey`)
+- `requestTimestamp`: DateTime
+- `requestUrl`: String
+- `requestMethod`: String
+- `requestHeaders`: Json (脱敏后)
+- `requestBody`: String? (LONGTEXT)
+- `routedProvider`: String
+- `routedModel`: String
+- `statusCode`: Int
+- `status`: String (例如: 'success', 'error', 'quota_exceeded')
+- `responseTimestamp`: DateTime
+- `responseTimeMs`: Int
+- `responseHeaders`: Json?
+- `responseBody`: String? (LONGTEXT)
+- `tokensIn`: Int?
+- `tokensOut`: Int?
+- `errorInfo`: String? (TEXT)
 
-      * `parentPort.on('message', (logData) => { ... })`:
-          * 将接收到的 `logData` 添加到内部队列 `logQueue.push(logData)`。
-          * 如果队列大小达到 `BATCH_SIZE`，立即触发批处理 `processBatch()`。
+## 错误处理
 
-3. **批处理函数 (`processBatch`)**:
+1.  **场景: 数据库暂时不可用**
+    -   **处理**: 日志 Worker 将在内部进行多次重试。如果所有重试都失败，它会将日志数据追加到本地的 `.jsonl` 文件中，以待后续处理。Worker 进程不会崩溃。
+    -   **用户影响**: 无。API 响应不受影响。
+2.  **场景: 日志 Worker 意外退出**
+    -   **处理**: 主线程将监听 Worker 的 `exit` 事件。一旦检测到异常退出，主线程将记录一个严重错误，并可以根据策略尝试重启 Worker。
+    -   **用户影响**: 短时间内可能会丢失少量日志，但 API 服务本身不受影响。
+3.  **场景: 服务正常关闭**
+    -   **处理**: 主线程将向 Worker 发送一个关闭信号。Worker 收到信号后，会尝试将内存队列中所有剩余的日志"刷"入数据库或备用文件，然后再正常退出。
 
-      * `clearTimeout(batchTimer)` (清除可能存在的定时器)。
-      * 如果队列为空，则返回。
-      * 从队列中取出最多 `BATCH_SIZE` 条日志 `const batch = logQueue.splice(0, BATCH_SIZE)`。
-      * **数据库交互**:
-          * 使用 Prisma Client 的 `prisma.request_log.createMany({ data: batch })` (需要适配 Prisma 的数据格式) 批量插入日志。
-          * **错误处理**:
-              * 捕获 `createMany` 可能抛出的错误 (数据库连接问题、数据格式错误等)。
-              * **重试**: 对于可恢复的错误（如连接超时），可以实现简单的延时重试逻辑 (最多 N 次)。
-              * **失败记录**: 对于无法写入的批次或单条记录，将其写入本地文件 (`failed_logs.jsonl`) 或发送错误消息回主线程。**避免 Worker 因写入失败而崩溃**。
-      * **重置定时器**: 如果队列中仍有日志，设置新的 `batchTimer = setTimeout(processBatch, BATCH_INTERVAL)`。
+## 测试策略
 
-4. **定时处理**:
+### 单元测试
 
-      * 在 Worker 初始化时启动第一个定时器 `batchTimer = setTimeout(processBatch, BATCH_INTERVAL)`。
-      * `processBatch` 函数在处理完后会根据队列情况重置定时器。
+- 测试 `logging.ts` 中间件的敏感信息脱敏逻辑是否按预期工作。
+- 测试 `logger.worker.ts` 中的队列管理、批处理和数据格式化逻辑（使用模拟的数据库连接）。
 
-5. **优雅关闭**:
+### 集成测试
 
-      * 监听 `parentPort.once('close', async () => { ... })` 或主线程发送的特定关闭消息。
-      * 在关闭前，调用 `processBatch()` 处理队列中剩余的所有日志。
-      * 等待最后的批处理写入完成。
-      * 断开数据库连接 `await prisma.$disconnect()`。
-      * `process.exit(0)`。
-
-## 6. 数据格式与脱敏
-
-* **数据传递**: 主线程与 Worker 之间传递序列化的 JSON 对象。
-* **数据库存储**:
-  * `request_headers`, `response_headers`: 存储为 JSON 类型。在存入前，**必须**移除敏感头部，如 `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, 以及任何自定义的敏感头部。
-  * `request_body`, `response_body`: 存储为 `LONGTEXT`。需要考虑**截断**过大的报文以控制存储大小，或者在记录前进行脱敏处理（例如移除敏感字段）。**初步决定**: 存储完整报文，依赖数据库分区和定期清理策略管理大小。
-* **错误处理**: `error_message` 存储为 TEXT，记录错误堆栈信息或关键错误消息。
-
-## 7. 性能与可靠性
-
-* **性能**: Worker Thread 隔离了数据库写入延迟。批处理写入减少了数据库连接和事务开销。主线程的开销主要在于数据收集和 `postMessage` 调用，应保持较低。
-* **可靠性**:
-  * Worker 内部队列处理写入失败和重试。
-  * 失败日志可记录到文件，便于后续排查或重新导入。
-  * 主线程需监控 Worker 状态，在 Worker 意外退出时尝试重启或记录严重错误。
-  * 数据库分区有助于 `request_logs` 表的长期维护和查询性能。
-
-## 8. 测试策略
-
-* **单元测试**:
-  * Worker Thread 的消息接收、队列管理、批处理逻辑。
-  * 数据库写入的错误处理和重试逻辑。
-  * 主线程日志数据收集和格式化逻辑。
-  * 头部和 Body 的脱敏/截断逻辑。
-* **集成测试**:
-  * 主线程发送消息 -\> Worker 接收 -\> 数据库成功写入的完整流程。
-  * 模拟数据库写入失败，验证 Worker 的重试和失败记录。
-  * 测试流式响应的完整 Body 是否能被正确捕获和记录。
-  * 测试高并发下系统是否稳定，日志是否丢失（允许少量因进程退出丢失）。
-  * 验证优雅关闭时，Worker 是否能处理完剩余队列。
+- 启动完整的应用，发送一个 API 请求，然后查询数据库，验证是否已正确创建相应的日志条目，并且所有字段都符合预期。
+- 测试 `GET /api/history` 端点，确保它能正确返回数据，并验证其权限控制（用户只能看到自己的日志）。
+- 通过模拟数据库连接失败，验证 Worker 是否能够正确触发重试机制，并最终回退到文件系统日志。
+- 测试应用的正常关闭流程，确保内存中的日志数据能够被成功持久化。

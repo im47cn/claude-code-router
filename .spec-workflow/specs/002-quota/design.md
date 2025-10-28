@@ -1,125 +1,141 @@
-# 配额系统设计文档
+# 设计文档
 
-## 1. 概述
+## 概述
 
 本文档描述了 `claude-code-router` 配额系统的技术设计，该系统旨在限制用户和 API 密钥在特定时间窗口内的请求次数。设计遵循 `.spec-workflow/specs/quota/requirements.md` 中定义的需求，并基于已确认的技术栈（MySQL, Worker Threads, 内存缓存）。
 
-## 2. 数据模型
+## 指导文档对齐
 
-相关数据库表（已在 Schema 设计文档中定义）：
+### 技术标准 (tech.md)
 
-* **`users`**: 存储用户基本信息。
-* **`api_keys`**: 存储 API 密钥信息。
-* **`user_quotas`**: 存储管理员为用户设置的配额规则 (`user_id`, `limit`, `interval_minutes`)。
-* **`api_key_quotas`**: 存储用户为其 API Key 设置的配额规则 (`api_key_id`, `limit`, `interval_minutes`)。
-* **`request_logs`**: 存储请求记录，用于配额检查计数。
+- **数据库**: 采用 MySQL 存储配额规则和请求日志，与 `tech.md` 一致。
+- **异步处理**: 利用 Node.js `worker_threads` 进行日志记录，避免阻塞主线程，符合性能要求。
+- **缓存**: 使用 `lru-cache` 实现内存缓存，以提升配额规则的读取性能。
 
-## 3. 配额检查逻辑 (集成于 API 认证 `preHandler` 钩子)
+### 项目结构 (structure.md)
 
-配额检查在 API 密钥认证成功之后、实际路由执行之前进行。
+- **`src/services/quotaService.ts`**: 将创建此文件以封装所有配额相关的业务逻辑。
+- **`src/middleware/auth.ts`**: 将修改此文件以集成配额检查逻辑。
+- **`src/api/`**: 将在 `admin` 和 `keys` 路由下添加配额管理的端点。
 
-**流程**:
+## 代码重用分析
 
-1. **获取标识**: 从 `req.user` 获取 `user_id`，从 `req.api_key_id` 获取 `api_key_id`。
-2. **获取用户配额规则**:
-    * 尝试从内存缓存 (`userQuotaCache`) 中读取 `user_id` 对应的规则 `{ limit, interval_minutes }`。
-    * 若缓存未命中，查询 `user_quotas` 表 `WHERE user_id = ?`。
-    * 将查询结果（包括规则不存在的情况，可以缓存一个特殊标记如 `null` 或 `{ limit: null }`）存入缓存，设置 TTL（例如 5 分钟）。
-3. **检查用户配额**:
-    * 如果从缓存或数据库获取到有效的用户配额规则 (`limit` 和 `interval_minutes` 均大于 0)：
-        * 计算时间窗口的起始时间 `startTime = NOW() - INTERVAL interval_minutes MINUTE`。
-        * 执行数据库查询: `SELECT COUNT(*) FROM request_logs WHERE user_id = ? AND status = 'success' AND request_timestamp >= ?` (参数: `user_id`, `startTime`)。
-        * **注意**: 索引 `(user_id, status, request_timestamp)` 对此查询非常重要。
-        * 如果 `COUNT(*)` >= `limit`，则配额超限。**立即**向日志 Worker 发送拒绝日志（包含 `user_id`, `api_key_id`, `status='quota_exceeded'`, `error_message='User quota exceeded'`），并返回 `HTTP 429 Too Many Requests` 错误给客户端。
-4. **获取 Key 配额规则**:
-    * 尝试从内存缓存 (`apiKeyQuotaCache`) 中读取 `api_key_id` 对应的规则 `{ limit, interval_minutes }`。
-    * 若缓存未命中，查询 `api_key_quotas` 表 `WHERE api_key_id = ?`。
-    * 将查询结果存入缓存，设置 TTL。
-5. **检查 Key 配额**:
-    * 如果从缓存或数据库获取到有效的 Key 配额规则 (`limit` 和 `interval_minutes` 均大于 0)：
-        * 计算时间窗口的起始时间 `startTime = NOW() - INTERVAL interval_minutes MINUTE`。
-        * 执行数据库查询: `SELECT COUNT(*) FROM request_logs WHERE api_key_id = ? AND status = 'success' AND request_timestamp >= ?` (参数: `api_key_id`, `startTime`)。
-        * **注意**: 索引 `(api_key_id, status, request_timestamp)` 对此查询非常重要。
-        * 如果 `COUNT(*)` >= `limit`，则配额超限。**立即**向日志 Worker 发送拒绝日志（包含 `user_id`, `api_key_id`, `status='quota_exceeded'`, `error_message='API key quota exceeded'`），并返回 `HTTP 429 Too Many Requests` 错误给客户端。
-6. **通过**: 如果所有配额检查都通过，则请求继续处理。
+### 要利用的现有组件
 
-**缓存实现**:
+- **API 认证中间件 (`src/middleware/auth.ts`)**: 配额检查逻辑将作为认证成功后的一个步骤集成到此中间件中。
+- **数据库连接 (`src/db/client.ts`)**: 配额服务将重用现有的数据库连接来查询 `request_logs` 和配额规则表。
+- **内存缓存 (`src/utils/cache.ts`)**: 将扩展或重用现有的缓存工具来缓存配额规则，减少数据库负载。
+- **异步日志 Worker**: 将利用现有的日志 Worker 来记录配额超限的请求。
 
-* 使用 `lru-cache` 或 `node-cache` 实现两个内存缓存实例：`userQuotaCache` 和 `apiKeyQuotaCache`。
-* 缓存 Key 为 `user_id` 或 `api_key_id`，Value 为配额规则对象 `{ limit, interval_minutes }` 或表示无规则的 `null`。
-* 设置合理的 TTL（例如 5 分钟），避免数据陈旧。
-* 在更新或删除配额规则时，需要主动清除相应的缓存条目。
+### 集成点
 
-**并发与精度**:
+- **`preHandler` 钩子**: 配额检查是认证流程的关键部分。
+- **`request_logs` 表**: 该表是计算当前请求数的直接数据来源。
+- **UI 应用**: 配额管理功能将集成到现有的管理员面板和用户 API 密钥管理页面中。
 
-* 此设计依赖于已写入 `request_logs` 的**成功**请求计数。由于日志是异步写入的，配额检查可能会有轻微延迟（在 Worker 写入数据库之前，新的请求可能已经开始处理）。
-* 在高并发下，短时间内（Worker 处理延迟期间）可能允许少量超过配额的请求。对于基于分钟的时间窗口，这种误差通常是可接受的。
-* 如果需要严格的实时限制，未来可以引入 Redis 原子计数器 (`INCR`, `EXPIRE`)，但这会增加系统复杂性和外部依赖。**当前阶段，接受基于日志表的轻微延迟**。
+## 架构
 
-## 4. 配额管理 API
+配额系统将作为认证流程的一部分，通过在内存中缓存配额规则并查询请求日志来实现高效的请求控制。
 
-### 4.1 用户配额 (管理员权限)
+### 模块化设计原则
 
-* **`PUT /admin/users/{userId}/quota`**: 设置或更新用户的配额规则。
-  * **权限**: `req.user.is_admin === true`。
-  * **请求体**: `{ "limit": number, "interval_minutes": number }` (`limit` 和 `interval_minutes` 必须 > 0)。
-  * **操作**:
-        1. 验证 `userId` 是否存在。
-        2. 在 `user_quotas` 表中 `INSERT ... ON DUPLICATE KEY UPDATE limit = ?, interval_minutes = ?`。
-        3. 清除 `userQuotaCache` 中对应 `userId` 的缓存。
-  * **响应**: `200 OK` 或 `201 Created`，返回更新后的配额规则。
+- **单一文件职责**: `quotaService.ts` 将专门负责配额的计算和检查逻辑。
+- **组件隔离**: 缓存、数据库查询和 API 端点将作为独立的功能部分。
+- **服务层分离**: 配额检查的业务逻辑将与 API 路由处理和数据访问清晰地分离开。
 
-* **`DELETE /admin/users/{userId}/quota`**: 移除用户的配额规则。
-  * **权限**: `req.user.is_admin === true`。
-  * **操作**:
-        1. 验证 `userId` 是否存在。
-        2. 从 `user_quotas` 表中删除 `WHERE user_id = ?` 的记录。
-        3. 清除 `userQuotaCache` 中对应 `userId` 的缓存（或设置为 `null`）。
-  * **响应**: `204 No Content`。
+```mermaid
+graph TD
+    A[API 请求] --> B{认证中间件 preHandler}
+    B --> C{API Key 验证}
+    C -- 成功 --> D{配额检查}
+    D -- 未超限 --> E[路由到 LLM]
+    D -- 超限 --> F[返回 HTTP 429]
+    F --> G[异步记录拒绝日志]
 
-* **`GET /admin/users/{userId}/quota`**: 获取用户的配额规则。
-  * **权限**: `req.user.is_admin === true`。
-  * **操作**: 查询 `user_quotas` 表。
-  * **响应**: `200 OK`，返回 `{ limit, interval_minutes }` 或 `404 Not Found`。
+    subgraph 配额检查
+        direction LR
+        D1[获取用户/Key配额规则] --> D2{规则是否存在？}
+        D1 --> D1a[缓存查询]
+        D1a -- 未命中 --> D1b[数据库查询]
+        D2 -- 是 --> D3[查询请求日志计数]
+        D3 --> D4{是否超限？}
+    end
+```
 
-### 4.2 API 密钥配额 (用户权限)
+## 组件和接口
 
-* **`PUT /api/keys/{keyId}/quota`**: 设置或更新指定 API Key 的配额规则。
-  * **权限**: Key 必须属于当前登录用户 (`req.user.id`)。
-  * **请求体**: `{ "limit": number, "interval_minutes": number }` (`limit` 和 `interval_minutes` 必须 > 0)。
-  * **操作**:
-        1. 验证 `api_keys` 表中 `id = keyId` 的记录是否存在且 `user_id` 匹配。
-        2. 在 `api_key_quotas` 表中 `INSERT ... ON DUPLICATE KEY UPDATE limit = ?, interval_minutes = ?`。
-        3. 清除 `apiKeyQuotaCache` 中对应 `keyId` 的缓存。
-  * **响应**: `200 OK` 或 `201 Created`，返回更新后的配额规则。
+### 组件1: QuotaService (`src/services/quotaService.ts`)
 
-* **`DELETE /api/keys/{keyId}/quota`**: 移除指定 API Key 的配额规则。
-  * **权限**: Key 必须属于当前登录用户。
-  * **操作**:
-        1. 验证 `api_keys` 表中 `id = keyId` 的记录是否存在且 `user_id` 匹配。
-        2. 从 `api_key_quotas` 表中删除 `WHERE api_key_id = ?` 的记录。
-        3. 清除 `apiKeyQuotaCache` 中对应 `keyId` 的缓存（或设置为 `null`）。
-  * **响应**: `204 No Content`。
+- **目的:** 封装所有与配额相关的业务逻辑，包括规则获取和请求计数。
+- **接口:**
+  - `checkUserQuota(userId: string): Promise<{exceeded: boolean}>`
+  - `checkApiKeyQuota(apiKeyId: string): Promise<{exceeded: boolean}>`
+  - `getRuleForUser(userId: string): Promise<QuotaRule | null>`
+  - `getRuleForApiKey(apiKeyId: string): Promise<QuotaRule | null>`
+- **依赖:** PrismaClient, `lru-cache` 实例。
+- **重用:** 数据库连接和缓存工具。
 
-* **`GET /api/keys/{keyId}/quota`**: 获取指定 API Key 的配额规则。
-  * **权限**: Key 必须属于当前登录用户。
-  * **操作**: 查询 `api_key_quotas` 表。
-  * **响应**: `200 OK`，返回 `{ limit, interval_minutes }` 或 `404 Not Found`。
+### 组件2: 配额管理 API
 
-## 5. 错误处理
+- **目的:** 提供用于管理配额规则的 HTTP 端点。
+- **接口:**
+  - `PUT /admin/users/{userId}/quota`
+  - `DELETE /admin/users/{userId}/quota`
+  - `PUT /api/keys/{keyId}/quota`
+  - `DELETE /api/keys/{keyId}/quota`
+- **依赖:** QuotaService, 认证中间件。
 
-* 当配额超限时，API `preHandler` **必须** 返回 `HTTP 429 Too Many Requests`。
-* 响应体 **可以** 包含 `Retry-After` 头部，指示客户端何时可以重试（例如，计算到当前时间窗口结束的秒数）。
-* 配额超限的请求 **仍应** 被异步记录到 `request_logs` 表，`status` 设为 `'quota_exceeded'`，并包含相应的错误消息。
+## 数据模型
 
-## 6. 测试策略
+### `user_quotas`
+- `user_id` (关联 `users`)
+- `limit` (INTEGER)
+- `interval_minutes` (INTEGER)
 
-* **单元测试**:
-  * 配额规则缓存的读写和失效逻辑。
-  * 配额检查的 SQL 查询语句构建。
-* **集成测试**:
-  * 模拟请求，测试 `preHandler` 中的配额检查逻辑（未超限、刚好超限、已超限）。
-  * 测试用户配额和 Key 配额的独立性。
-  * 测试配额管理 API 的 CRUD 操作及其对缓存的影响。
-  * 验证配额超限时是否正确返回 429 并记录日志。
-* **性能测试**: (可选) 在高并发下测试配额检查的性能，评估 `request_logs` 查询是否成为瓶颈。
+### `api_key_quotas`
+- `api_key_id` (关联 `api_keys`)
+- `limit` (INTEGER)
+- `interval_minutes` (INTEGER)
+
+## 错误处理
+
+### 错误场景
+
+1. **场景: 配额超限**
+   - **处理:** `preHandler` 钩子捕获 `QuotaService` 的超限结果，立即中断请求并返回 `HTTP 429 Too Many Requests`。
+   - **用户影响:** 客户端收到明确的速率限制错误，并可能根据 `Retry-After` 头部进行重试。
+2. **场景: 配额规则更新失败**
+   - **处理:** API 端点捕获数据库错误，返回 `HTTP 500 Internal Server Error`。
+   - **用户影响:** 管理员或用户在 UI 上看到操作失败的提示。
+
+## 测试策略
+
+### 单元测试
+
+- 测试 `QuotaService` 中配额规则的缓存逻辑（命中、未命中、失效）。
+- 测试时间窗口计算和数据库查询语句的构建是否正确。
+
+### 集成测试
+
+- 模拟一系列请求，精确测试配额检查的边界条件（未超限、刚好达到、超限）。
+- 测试用户配额和 API 密钥配额的独立性和组合效果。
+- 测试配额管理 API 的 CRUD 操作，并验证缓存是否被正确清除。
+- 验证配额超限时是否正确返回 429 状态码，并检查 `request_logs` 中是否生成了类型为 `quota_exceeded` 的日志。
+
+### 性能测试 (可选)
+
+- 在高并发环境下对受配额限制的端点进行压力测试，以评估 `request_logs` 表的查询性能是否成为瓶颈，并确定是否需要进一步优化（如引入 Redis）。
+
+## 原始文档的附加内容
+
+### API 设计
+
+#### 用户配额 (管理员权限)
+- **`PUT /admin/users/{userId}/quota`**: 设置或更新用户的配额规则。 `{ "limit": number, "interval_minutes": number }`
+- **`DELETE /admin/users/{userId}/quota`**: 移除用户的配额规则。
+- **`GET /admin/users/{userId}/quota`**: 获取用户的配额规则。
+
+#### API 密钥配额 (用户权限)
+- **`PUT /api/keys/{keyId}/quota`**: 设置或更新指定 API Key 的配额规则。`{ "limit": number, "interval_minutes": number }`
+- **`DELETE /api/keys/{keyId}/quota`**: 移除指定 API Key 的配额规则。
+- **`GET /api/keys/{keyId}/quota`**: 获取指定 API Key 的配额规则。

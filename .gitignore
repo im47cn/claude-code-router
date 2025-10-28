@@ -6,3 +6,12 @@ dist
 .DS_Store
 .vscode
 tsconfig.tsbuildinfo
+
+# Runtime generated files
+.browser-echo-mcp.json
+
+# Claude and IDE generated directories
+.spec-workflow/approvals
+
+# Test coverage reports
+coverage/

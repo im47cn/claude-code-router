@@ -1,123 +1,128 @@
-# 异步日志系统开发任务列表
+# 任务文档
 
-## 1. 概述
+- [ ] 0. 定义数据库 Schema 和日志数据模型
+  - 文件: prisma/schema.prisma (修改), src/types/logging.ts
+  - 使用 Prisma 定义 request_logs 表，包含所有必要字段和索引。创建 TypeScript 接口定义日志数据结构。
+  - 目的: 建立日志数据存储的基础结构和类型安全。
+  - _重用: 现有 Prisma schema, src/types/base.ts_
+  - _需求: 需求1.1, 需求1.2_
+  - _Prompt: 角色: 数据库架构师 | 任务: 设计 request_logs 表的完整 schema，包括 id (UUID), user_id (UUID, 外键), api_key_id (UUID, 外键), timestamp (DateTime), status (Enum: success, error, quota_exceeded), request_size (Int), response_size (Int), model (String), provider (String), error_message (Text, nullable), created_at, updated_at。添加复合索引 (user_id, timestamp) 和 (api_key_id, timestamp) 优化查询性能。创建对应的 TypeScript 接口确保类型安全 | 限制: 必须与现有用户和API密钥表结构兼容，索引必须优化时间范围查询性能 | 成功: Prisma migration 成功执行，TypeScript 编译无错误，查询性能测试通过_
 
-本文档将 `.spec-workflow/specs/logging/design.md` 中定义的异步日志系统功能分解为具体的开发和测试任务。
+- [ ] 1. 创建 Logger Worker Thread
+  - 文件: src/workers/logger.worker.ts
+  - 实现完整的 Worker 线程架构，包括消息监听、内部队列管理、批处理逻辑、数据库连接池和错误恢复机制。
+  - 目的: 将日志记录从主线程分离，避免阻塞 API 响应，确保高性能异步日志处理。
+  - _重用: 数据库连接池, worker_threads API, 现有错误处理工具_
+  - _需求: 需求3, 需求4_
+  - _Prompt: 角色: 后端开发者，专精 Node.js Worker 线程和高并发处理 | 任务: 实现生产级异步日志 Worker，包含消息队列 (最大1000条)，批处理逻辑 (批量大小100条或5秒超时)，数据库连接池管理，指数退避重试机制 (最多重试3次，延迟1s/2s/4s)，内存监控和清理机制。Worker 必须处理 parentPort.on('message') 接收日志数据，使用 PrismaClient 批量插入，实现优雅关闭处理所有队列中的日志 | 限制: 必须使用 worker_threads API，不能阻塞主线程，必须处理数据库连接失败和网络中断，内存使用不能超过50MB | 成功: Worker 能稳定处理每秒1000+日志条目，数据库连接失败时自动重试，优雅关闭时无日志丢失，内存使用稳定_
 
-## 2. 前置任务 (依赖)
+- [ ] 2. 实现日志收集中间件
+  - 文件: src/middleware/logging.ts
+  - 创建 Fastify onResponse 钩子，完整收集请求/响应数据，实现敏感信息脱敏，处理流式响应，通过 postMessage 异步发送给 Worker。
+  - 目的: 在主线程中高效、安全地收集所有API调用的完整日志数据。
+  - _重用: Fastify 钩子机制, Worker 实例, 现有认证中间件_
+  - _需求: 需求1, 需求2_
+  - _Prompt: 角色: 后端开发者，专精 Fastify 中间件和HTTP协议处理 | 任务: 实现生产级日志收集中间件，注册 Fastify onResponse 钩子，从 request.context 获取用户信息 (user_id, api_key_id)，捕获完整的请求/响应周期数据，包括请求大小、响应大小、处理时间、模型和提供商信息。实现流式响应的完整内容捕获 (使用 stream.tee() 复制流)，敏感数据脱敏函数 (脱敏 Authorization、X-Api-Key、Set-Cookie 等头部)，通过 parentPort.postMessage 异步发送日志到 Worker，包含错误处理避免日志收集影响API响应 | 限制: 不能增加API响应延迟超过5ms，必须处理所有HTTP状态码和响应类型，不能记录敏感信息，必须处理流式响应和二进制数据 | 成功: 所有API调用的完整信息被准确收集，敏感信息被正确脱敏，流式响应内容完整记录，API性能不受影响_
 
-* **LOGGING-TASK-001**: **[DB Migration]** 确保 `request_logs` 表已通过数据库迁移创建，包含所有必需的字段和索引 (由 AUTH-TASK-002 覆盖)。
-  * **Dev**: Backend Team
-  * **Test**: N/A
-* **LOGGING-TASK-002**: **[Backend Setup]** 确保 Prisma Client (或选定 ORM/Query Builder) 已配置并可在 Worker Thread 中使用。
-  * **Dev**: Backend Team
-  * **Test**: N/A
-* **LOGGING-TASK-003**: **[Backend Setup]** 确保 API 认证 `preHandler` 钩子能正确附加 `req.user.id` 和 `req.api_key_id` (由 AUTH-TASK-104 覆盖)。
-  * **Dev**: Backend Team
-  * **Test**: N/A
+- [ ] 3. 实现敏感数据脱敏工具
+  - 文件: src/utils/sanitizer.ts
+  - 创建全面的敏感数据脱敏工具，支持HTTP头部、JSON体、查询参数的敏感信息识别和脱敏处理。
+  - 目的: 确保日志中不包含任何敏感信息，符合数据安全和隐私保护要求。
+  - _重用: 现有工具函数, 正则表达式库_
+  - _需求: 需求2.2_
+  - _Prompt: 角色: 安全工程师，专精数据脱敏和隐私保护 | 任务: 实现企业级敏感数据脱敏工具，创建 sanitizeHeaders() 函数脱敏 Authorization、X-Api-Key、Cookie、Set-Cookie 等敏感头部 (显示前3位+***+后3位)，sanitizeBody() 函数处理JSON对象中的敏感字段 (password、token、key、secret、credential等)，sanitizeUrl() 函数处理查询参数中的敏感信息，sanitizeJson() 函数递归处理嵌套JSON结构。支持自定义敏感字段列表，支持不同脱敏策略 (mask、remove、hash)。包含单元测试覆盖所有脱敏场景 | 限制: 必须处理所有数据类型 (string, number, boolean, object, array)，不能影响非敏感数据，性能开销不能超过1ms，必须支持流式数据的增量脱敏 | 成功: 所有已知敏感信息被正确识别并脱敏，脱敏后的日志仍保持可读性，性能测试通过，无敏感信息泄露_
 
-## 3. 日志 Worker Thread 实现
+- [ ] 4. 实现流式响应日志处理
+  - 文件: src/middleware/logging.ts (扩展), src/utils/streamProcessor.ts
+  - 实现高性能的流式响应内容捕获和处理，支持大文件和长时间流的完整记录。
+  - 目的: 确保流式响应（如SSE、大文件下载）的完整内容被准确记录，不影响客户端接收。
+  - _重用: Stream API, Buffer 处理, 现有日志中间件_
+  - _需求: 需求2.3_
+  - _Prompt: 角色: Node.js 流处理专家 | 任务: 实现企业级流式响应日志处理，创建 StreamProcessor 类处理流式响应，使用 stream.tee() 在不影响客户端的情况下复制流数据，实现内存优化的流缓冲 (最大10MB)，支持多种流类型 (Readable, Writable, Transform)，处理流错误和异常情况，实现流数据的增量脱敏，支持大文件的分块处理。包含流状态监控 (读取速度、总大小、处理进度)，超时处理 (默认30分钟)，内存泄漏防护 | 限制: 不能增加流延迟超过100ms，内存使用不能超过10MB，必须处理流中断和错误，支持二进制数据，必须向后兼容现有API | 成功: 流式响应100%完整记录，客户端接收不受影响，内存使用稳定，支持长时间运行的流 (如SSE) 和大文件 (GB级别)_
 
-* **LOGGING-TASK-101**: **[Backend Dev]** 创建日志 Worker 脚本 (`src/workers/logger.worker.ts`)。
-  * **Desc**: 设置基本的 Worker 结构，引入 `worker_threads` 模块，处理 `workerData` (数据库连接信息)。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-151
-* **LOGGING-TASK-102**: **[Backend Dev]** 在 Worker 中初始化数据库连接。
-  * **Desc**: 实例化 Prisma Client (或 DB 库) 并建立连接池。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-151
-* **LOGGING-TASK-103**: **[Backend Dev]** 在 Worker 中实现消息监听和内部队列。
-  * **Desc**: 使用 `parentPort.on('message', ...)` 接收日志数据，将其推入内存数组 (`logQueue`)。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-152
-* **LOGGING-TASK-104**: **[Backend Dev]** 在 Worker 中实现批处理写入数据库逻辑 (`processBatch`)。
-  * **Desc**: 实现从队列取出数据，调用 `prisma.request_log.createMany()` (或等效) 批量插入。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-153
-* **LOGGING-TASK-105**: **[Backend Dev]** 在 Worker 中实现定时触发批处理。
-  * **Desc**: 使用 `setTimeout` 按 `BATCH_INTERVAL` 调用 `processBatch`。确保在队列满或定时器到期时都触发处理。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-154
-* **LOGGING-TASK-106**: **[Backend Dev]** 在 Worker 中实现错误处理和重试机制。
-  * **Desc**: 捕获数据库写入错误。对可恢复错误进行延时重试。对无法恢复的错误，将失败的批次/记录写入本地 `failed_logs.jsonl` 文件。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-155
-* **LOGGING-TASK-107**: **[Backend Dev]** 在 Worker 中实现优雅关闭逻辑。
-  * **Desc**: 监听关闭信号，处理剩余队列，断开数据库连接。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-156
-* **LOGGING-TASK-151**: **[Backend Test]** 单元测试 Worker 初始化和数据库连接。
-  * **Desc**: 验证 Worker 是否能成功启动并建立数据库连接。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-152**: **[Backend Test]** 单元测试 Worker 消息接收和队列功能。
-  * **Desc**: 模拟主线程发送消息，验证 Worker 是否能正确接收并添加到内部队列。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-153**: **[Backend Test]** 单元测试 Worker 批处理写入逻辑。
-  * **Desc**: Mock 数据库写入操作，验证 `processBatch` 是否按预期从队列取数据并调用写入函数。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-154**: **[Backend Test]** 单元测试 Worker 定时触发逻辑。
-  * **Desc**: 使用 `jest.useFakeTimers()` (或类似) 测试定时器是否按预期触发 `processBatch`。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-155**: **[Backend Test]** 单元测试 Worker 错误处理和重试逻辑。
-  * **Desc**: Mock 数据库写入失败，验证重试是否按预期执行，失败日志是否写入文件。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-156**: **[Backend Test]** 测试 Worker 优雅关闭逻辑。
-  * **Desc**: 模拟关闭信号，验证剩余队列是否被处理，连接是否断开。
-  * **Dev**: Backend Team
+- [ ] 5. 实现批处理策略和队列管理
+  - 文件: src/workers/queueManager.ts, src/workers/batchProcessor.ts
+  - 创建高性能的批处理策略和内存队列管理系统，优化数据库写入性能和内存使用。
+  - 目的: 最大化日志系统吞吐量，最小化数据库写入次数，确保高并发下的稳定性。
+  - _重用: Worker 线程, 数据库连接池, 现有错误处理_
+  - _需求: 需求3.1, 需求3.2_
+  - _Prompt: 角色: 后端性能优化专家，专精队列系统和批处理算法 | 任务: 实现生产级批处理系统，创建 QueueManager 类管理内存队列 (环形缓冲区，最大10000条)，实现优先级队列 (错误日志优先处理)，批处理策略 (动态批量大小：100-1000条基于吞吐量，智能超时：1-5秒基于负载)，背压机制 (队列达到80%时丢弃最旧的非错误日志)，内存监控和GC优化。创建 BatchProcessor 类处理批量插入逻辑，使用事务确保数据一致性，实现并行批处理 (最多3个并行批次)。包含性能指标收集 (吞吐量、延迟、队列深度) | 限制: 内存使用不能超过100MB，CPU使用不能超过20%，单次批处理不能超过1秒，必须处理内存不足情况 | 成功: 每秒处理2000+日志条目，数据库写入次数减少95%，内存和CPU使用稳定，无数据丢失_
 
-## 4. 主线程日志收集与发送
+- [ ] 6. 实现历史记录查询 API
+  - 文件: src/api/history.ts, src/services/historyService.ts
+  - 创建完整的历史记录查询系统，包括高性能查询API、数据聚合服务和实时统计功能。
+  - 目的: 为用户和管理员提供强大的API使用历史查询、统计和分析功能。
+  - _重用: API 路由结构, 认证中间件, 现有数据库连接_
+  - _需求: 需求5.1, 需求5.2_
+  - _Prompt: 角色: API 开发者，专精查询优化和数据分析 | 任务: 实现企业级历史查询API，创建 GET /api/history 端点支持多维过滤 (user_id, api_key_id, status, model, provider, 时间范围)，高性能分页 (基于游标的分页，每页20-100条)，实时聚合查询 (按状态、模型、时间维度统计)，缓存机制 (Redis缓存热查询，TTL 5分钟)。实现 HistoryService 类处理复杂查询逻辑，使用数据库索引优化，支持数据导出 (CSV/JSON格式)，包含查询性能监控 (慢查询>1秒告警)。管理员权限支持查看所有用户数据，普通用户只能查询自己的数据 | 限制: 单次查询不能超过1000条结果，查询响应时间P99 < 500ms，必须防止SQL注入，必须有适当的权限控制 | 成功: API支持复杂的过滤和分页查询，响应时间达标，权限控制严格，支持数据导出和统计功能_
 
-* **LOGGING-TASK-201**: **[Backend Dev]** 在主线程启动并管理日志 Worker。
-  * **Desc**: 在 `src/index.ts` 或 `src/server.ts` 中创建 Worker 实例，传递数据库连接信息，设置错误和退出监听器。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-251 (集成)
-* **LOGGING-TASK-202**: **[Backend Dev]** 实现 Fastify `onResponse` 钩子 (`src/middleware/logging.ts`)。
-  * **Desc**: 注册钩子，在其中收集非流式响应的日志数据。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-252 (集成)
-* **LOGGING-TASK-203**: **[Backend Dev]** 实现日志数据格式化与脱敏逻辑。
-  * **Desc**: 创建函数格式化日志对象，移除 `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key` 等敏感头部。考虑 Body 截断或脱敏（初步只做头部脱敏）。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-253 (单元)
-* **LOGGING-TASK-204**: **[Backend Dev]** 在 `onResponse` 钩子中调用 `worker.postMessage()` 发送日志数据。
-  * **Desc**: 将格式化和脱敏后的日志对象发送给 Worker。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-252 (集成)
-* **LOGGING-TASK-205**: **[Backend Dev]** 在配额检查失败时 (`preHandler`) 发送 `quota_exceeded` 日志。
-  * **Desc**: 构造简化的拒绝日志对象并调用 `worker.postMessage()`。
-  * **Depends**: QUOTA-TASK-103
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-155 (集成)
-* **LOGGING-TASK-206**: **[Backend Dev]** (难点) 处理流式响应的日志记录。
-  * **Desc**: 在 `onSend` 钩子中检测 `ReadableStream`，使用 `tee()` 复制流。启动一个异步任务读取复制流的完整内容。在 `onResponse` 钩子中将其他日志信息与读取到的完整响应体关联（可能通过请求 ID），然后发送给 Worker。需要仔细处理流读取错误和超时。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-254 (集成)
-* **LOGGING-TASK-251**: **[Backend Test]** 集成测试 Worker 的启动、通信和关闭。
-  * **Desc**: 验证主线程能否成功启动 Worker，发送消息，以及在主线程退出时 Worker 能否优雅关闭。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-252**: **[Backend Test]** 集成测试 `onResponse` 钩子的日志收集和发送 (非流式)。
-  * **Desc**: 模拟 API 请求和响应，验证 `onResponse` 钩子是否触发，日志数据是否正确收集并发送给 Worker (可 Mock `postMessage`)。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-253**: **[Backend Test]** 单元测试日志数据格式化和脱敏逻辑。
-  * **Desc**: 验证敏感头部是否移除，数据结构是否符合预期。
-  * **Dev**: Backend Team
-* **LOGGING-TASK-254**: **[Backend Test]** 集成测试流式响应的日志记录。
-  * **Desc**: 模拟返回流式响应的 API 请求，验证完整的响应体是否能被捕获并与其他日志信息一起正确发送给 Worker。
-  * **Dev**: Backend Team
+- [ ] 7. 实现数据库性能优化
+  - 文件: prisma/schema.prisma (修改), prisma/migrations/
+  - 设计和实现完整的数据库索引策略，优化查询性能并支持大规模数据存储。
+  - 目的: 确保日志系统在高数据量下仍能保持优异的查询性能。
+  - _重用: Prisma 迁移, 数据库分析工具_
+  - _需求: 非功能性需求 - 性能_
+  - _Prompt: 角色: 数据库性能优化专家 | 任务: 实现生产级数据库优化，分析查询模式并创建最优索引策略：复合索引 (user_id, timestamp DESC) 支持用户历史查询，复合索引 (api_key_id, timestamp DESC) 支持API密钥使用统计，复合索引 (status, timestamp) 支持状态统计，单列索引 (model), (provider) 支持模型/提供商分析。创建分区表策略 (按月分区 request_logs 表) 提升查询性能和数据管理效率。实现数据清理策略 (自动删除6个月前的日志数据)。创建性能监控查询，定期分析索引使用情况和查询性能 | 限制: 索引不能影响写入性能超过10%，分区策略必须透明应用，数据清理不能影响在线查询 | 成功: 复杂查询响应时间<100ms，支持TB级数据存储，自动数据清理工作正常，索引使用率>95%_
 
-## 5. 日志查询 API (可选，取决于 UI 需求)
+- [ ] 8. 实现容错和恢复机制
+  - 文件: src/workers/logger.worker.ts (扩展), src/utils/errorRecovery.ts
+  - 创建企业级的容错和恢复系统，确保在各种故障场景下的数据完整性和服务可用性。
+  - 目的: 提供零数据丢失保证，实现故障自动恢复和降级处理。
+  - _重用: 文件系统 API, 现有错误处理框架_
+  - _需求: 需求4.1, 需求4.2, 需求4.3_
+  - _Prompt: 角色: 可靠性工程师，专精故障恢复和容错系统设计 | 任务: 实现生产级容错系统，创建指数退避重试机制 (1s/2s/4s/8s/16s，最多重试5次)，断路器模式 (连续失败10次后熔断5分钟)，备用存储策略 (数据库不可用时写入本地文件，恢复后自动补录)，数据完整性校验 (使用校验和验证数据完整性)，健康检查机制 (定期检查数据库连接状态)，自动恢复流程 (服务恢复后自动处理备用存储中的数据)。实现监控告警 (故障超过阈值时发送通知)，包含故障诊断日志和性能指标 | 限制: 备用存储不能使用超过1GB磁盘空间，恢复流程不能影响正常性能，必须处理磁盘空间不足情况 | 成功: 数据库故障时无数据丢失，服务自动恢复时间<5分钟，故障期间所有日志被安全保存，恢复后自动补录成功率100%_
 
-* **LOGGING-TASK-301**: **[Backend Dev]** 实现 `GET /api/history` 端点。
-  * **Desc**: 验证用户身份 (Session/JWT)，根据 `user_id` 查询 `request_logs` 表，支持按时间 `request_timestamp` 倒序分页，可选按时间范围过滤。**注意**: 返回数据时不应包含完整的请求/响应体，只包含摘要或必要字段。
-  * **Dev**: Backend Team
-  * **Test**: LOGGING-TASK-351
-* **LOGGING-TASK-351**: **[Backend Test]** 集成测试 `GET /api/history` 端点。
-  * **Desc**: 模拟用户请求，验证是否能正确返回日志列表、分页是否工作、权限是否控制、是否包含敏感信息。
-  * **Dev**: Backend Team
+- [ ] 9. 实现 Worker 生命周期管理
+  - 文件: src/workers/logger.worker.ts (扩展), src/utils/workerManager.ts
+  - 创建完整的Worker生命周期管理系统，包括启动监控、优雅关闭、资源清理和健康状态跟踪。
+  - 目的: 确保Worker在各种部署场景下的稳定运行和数据安全。
+  - _重用: process 信号处理, 现有监控工具_
+  - _需求: 需求4.4_
+  - _Prompt: 角色: DevOps 工程师，专精进程管理和容器化部署 | 任务: 实现企业级Worker生命周期管理，创建 WorkerManager 类处理Worker启动和关闭，监听 SIGTERM、SIGINT、SIGUSR1 信号 (最多等待30秒处理完队列中的日志)，实现资源清理 (数据库连接、定时器、文件句柄)，健康状态报告 (定期发送心跳到主线程)，内存使用监控 (超过80%时触发GC)，性能指标收集 (处理速度、队列深度、错误率)。支持热重启 (收到SIGUSR2信号时重新加载Worker而不丢失数据)，包含部署脚本和Docker配置优化 | 限制: 优雅关闭不能超过30秒，内存使用不能超过100MB，必须处理信号丢失情况，Docker环境下必须正确处理stop信号 | 成功: 应用关闭时100%无数据丢失，Worker崩溃时自动重启，资源完全清理，支持容器化部署和水平扩展_
 
-## 6. 依赖关系
+- [ ] 9. 为日志 Worker 编写单元测试
+  - 文件: tests/workers/logger.worker.test.ts
+  - 测试 Worker 的消息处理、队列管理、批处理和错误处理逻辑。
+  - 目的: 确保 Worker 的可靠性。
+  - _重用: 测试工具, Mock 框架_
+  - _需求: 需求4_
+  - _提示: 角色: QA 工程师 | 任务: 编写 Worker 单元测试 | 限制: 必须覆盖所有错误场景 | 成功: 测试覆盖率高，所有场景通过。_
 
-* Worker 实现 (LOGGING-TASK-1xx) 依赖数据库模型 (AUTH-TASK-002)。
-* 主线程日志收集 (LOGGING-TASK-2xx) 依赖 Worker 初始化 (LOGGING-TASK-201) 和认证钩子 (AUTH-TASK-104)。
-* 配额超限日志 (LOGGING-TASK-205) 依赖配额检查逻辑 (QUOTA-TASK-103)。
-* 日志查询 API (LOGGING-TASK-3xx) 依赖日志写入流程能正确记录数据。
+- [ ] 10. 为日志中间件编写单元测试
+  - 文件: tests/middleware/logging.test.ts
+  - 测试日志收集、脱敏和发送逻辑，包括流式响应处理。
+  - 目的: 确保日志收集的准确性和安全性。
+  - _重用: 测试工具_
+  - _需求: 需求1, 需求2_
+  - _提示: 角色: QA 工程师 | 任务: 编写中间件单元测试 | 限制: 必须测试各种请求/响应类型 | 成功: 所有类型请求的日志都被正确收集。_
+
+- [ ] 11. 为历史查询 API 编写集成测试
+  - 文件: tests/api/history.test.ts
+  - 测试 API 端点的权限控制、分页、过滤等功能。
+  - 目的: 确保 API 的正确性和安全性。
+  - _重用: 集成测试框架_
+  - _需求: 需求5.1, 需求5.2_
+  - _提示: 角色: QA 工程师 | 任务: 编写 API 集成测试 | 限制: 必须覆盖权限边界情况 | 成功: API 安全可靠，功能完整。_
+
+- [ ] 12. 端到端日志系统测试
+  - 文件: tests/e2e/logging.test.ts
+  - 测试完整的日志记录流程，从 API 请求到数据库存储，再到历史查询。
+  - 目的: 验证整个日志系统的端到端功能。
+  - _重用: E2E 测试框架_
+  - _需求: 所有需求_
+  - _提示: 角色: QA 自动化工程师 | 任务: 编写 E2E 测试 | 限制: 必须模拟真实使用场景 | 成功: 端到端流程验证通过。_
+
+- [ ] 13. 性能压力测试
+  - 文件: tests/performance/logging.test.ts
+  - 测试高并发下日志系统的性能，验证 Worker 不影响主线程响应时间。
+  - 目的: 确保日志系统不影响 API 性能。
+  - _重用: 性能测试工具_
+  - _需求: 非功能性需求 - 性能_
+  - _提示: 角色: 性能工程师 | 任务: 执行性能压力测试 | 限制: 必须达到性能指标 | 成功: 系统在高并发下保持性能。_
+
+## 依赖关系
+
+* 日志 Worker 实现依赖于数据库模型和连接配置。
+* 日志中间件依赖于 Worker 实例和认证系统。
+* 历史查询 API 依赖于日志数据的正确存储。
+* 所有组件都依赖于错误处理和重试机制的实现。

@@ -56,6 +56,13 @@ This project is a TypeScript-based router for Claude Code requests. It allows ro
 - `@musistudio/llms` is implemented based on `fastify` and exposes `fastify`'s hook and middleware interfaces, allowing direct use of `server.addHook`.
 - 无论如何你都不能自动提交git
 
+## Steering Documents
+
+Additional guidance documents are available to steer development in the right direction:
+
+- @.claude/system-prompts/spec-workflow-starter.md Comprehensive guide for spec workflow, including systematic design thinking, unified architecture patterns, quality assurance standards, and cross-functional coordination for feature development
 - @.spec-workflow/steering/project.md Define the product vision, target users, key features, and business objectives
 - @.spec-workflow/steering/structure.md Document technical architecture decisions, technology stack, and development principles
 - @.spec-workflow/steering/tech.md Describe the codebase organization, directory structure, and module architecture
+
+These steering documents provide project-specific conventions, patterns, and rules that should be followed when working on this codebase.
