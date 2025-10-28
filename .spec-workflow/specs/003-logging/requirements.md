@@ -15,17 +15,17 @@
 ### 2.2 记录内容
 
 * **FR-LOG-DATA-001**: 每条日志记录 **必须** 包含以下核心信息：
-    * 关联的用户 ID (`user_id`)
-    * 使用的 API Key ID (`api_key_id`)
-    * 请求到达时间戳 (`request_timestamp`)，精确到毫秒
-    * 请求 URL (`request_url`)
-    * 请求方法 (`request_method`)
-    * 路由决策后的 Provider 名称 (`routed_provider`)
-    * 路由决策后的 Model 名称 (`routed_model`)
-    * 最终 HTTP 响应状态码 (`status_code`)
-    * 请求处理状态 (`status`: 'success', 'error', 'quota_exceeded')
-    * 响应完成时间戳 (`response_timestamp`)，精确到毫秒
-    * 总响应时间 (`response_time_ms`)
+  * 关联的用户 ID (`user_id`)
+  * 使用的 API Key ID (`api_key_id`)
+  * 请求到达时间戳 (`request_timestamp`)，精确到毫秒
+  * 请求 URL (`request_url`)
+  * 请求方法 (`request_method`)
+  * 路由决策后的 Provider 名称 (`routed_provider`)
+  * 路由决策后的 Model 名称 (`routed_model`)
+  * 最终 HTTP 响应状态码 (`status_code`)
+  * 请求处理状态 (`status`: 'success', 'error', 'quota_exceeded')
+  * 响应完成时间戳 (`response_timestamp`)，精确到毫秒
+  * 总响应时间 (`response_time_ms`)
 * **FR-LOG-DATA-002**: 每条日志记录 **必须** 包含完整的请求头 (`request_headers`)，存储为 JSON 格式。**必须** 对敏感信息（如 `Authorization`, `Cookie`, `X-Api-Key` 等）进行脱敏处理。
 * **FR-LOG-DATA-003**: 每条日志记录 **必须** 包含完整的请求体 (`request_body`)，存储为 TEXT 或 LONGTEXT 格式。
 * **FR-LOG-DATA-004**: 每条日志记录 **必须** 包含完整的响应头 (`response_headers`)，存储为 JSON 格式。**必须** 对敏感信息（如 `Set-Cookie` 等）进行脱敏处理。
