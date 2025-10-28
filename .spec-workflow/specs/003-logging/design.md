@@ -16,8 +16,8 @@
 
 系统包含两个主要部分：
 
-1.  **主线程 (API Server)**: 负责收集日志数据并通过消息通道发送给 Worker Thread。
-2.  **日志 Worker Thread**: 负责接收日志数据、连接数据库并将数据写入 `request_logs` 表。
+1. **主线程 (API Server)**: 负责收集日志数据并通过消息通道发送给 Worker Thread。
+2. **日志 Worker Thread**: 负责接收日志数据、连接数据库并将数据写入 `request_logs` 表。
 
 ```mermaid
 sequenceDiagram
@@ -48,14 +48,14 @@ sequenceDiagram
 
 ## 4. 主线程实现 (`src/index.ts`, `src/server.ts`)
 
-1.  **Worker 初始化**:
+1. **Worker 初始化**:
 
       * 在服务器启动时 (`src/index.ts` 或 `src/server.ts` 的启动逻辑中)，创建一个新的 Worker Thread 实例。
       * Worker 脚本路径指向 `src/workers/logger.worker.ts` (或编译后的 JS 文件)。
       * 向 Worker 传递必要的初始化数据，例如数据库连接字符串（通过 `workerData`）。 **注意**: 避免直接传递完整的配置对象，只传递必要信息。
       * 设置 Worker 的错误处理 (`worker.on('error', ...)`), 退出处理 (`worker.on('exit', ...)`), 和消息监听 (`worker.on('message', ...)` - 如果 Worker 需要向主线程发送状态)。
 
-2.  **日志数据收集 (`onResponse` 钩子)**:
+2. **日志数据收集 (`onResponse` 钩子)**:
 
       * 注册一个 Fastify `onResponse` 钩子。此钩子在响应发送完毕后触发。
       * 在钩子中，收集以下信息:
@@ -81,14 +81,14 @@ sequenceDiagram
           * 异步读取复制流的完整内容，完成后将其添加到日志数据对象中。这部分逻辑需要在 `onResponse` 钩子之后完成，但日志消息应包含一个唯一 ID 以便关联。或者，在 `onSend` 中启动读取，在 `onResponse` 中等待读取完成（可能增加 `onResponse` 延迟，需权衡）。**初步选择**: 在 `onResponse` 触发时再启动读取复制流（如果存在），读取完成后再发送给 Worker。
       * **处理配额超限日志**: 在 `preHandler` 配额检查失败时，构造一个简化的日志对象（包含 `userId`, `apiKeyId`, `timestamp`, `status='quota_exceeded'`, `errorMessage`），直接发送给 Worker。
 
-3.  **发送日志到 Worker**:
+3. **发送日志到 Worker**:
 
       * 将收集到的完整日志数据对象通过 `worker.postMessage(logData)` 发送给 Worker Thread。
       * **错误处理**: 主线程的 `postMessage` 调用通常不会失败，但需要处理 Worker 意外退出的情况。
 
 ## 5. 日志 Worker Thread 实现 (`src/workers/logger.worker.ts`)
 
-1.  **初始化**:
+1. **初始化**:
 
       * 引入 `worker_threads` (`parentPort`, `workerData`)。
       * 引入 Prisma Client (或选择的 DB 库)。
@@ -98,13 +98,13 @@ sequenceDiagram
       * 设置批处理参数（例如 `BATCH_SIZE = 50`, `BATCH_INTERVAL = 1000`ms）。
       * 设置一个定时器 (`batchTimer`) 用于按间隔处理。
 
-2.  **消息监听**:
+2. **消息监听**:
 
       * `parentPort.on('message', (logData) => { ... })`:
           * 将接收到的 `logData` 添加到内部队列 `logQueue.push(logData)`。
           * 如果队列大小达到 `BATCH_SIZE`，立即触发批处理 `processBatch()`。
 
-3.  **批处理函数 (`processBatch`)**:
+3. **批处理函数 (`processBatch`)**:
 
       * `clearTimeout(batchTimer)` (清除可能存在的定时器)。
       * 如果队列为空，则返回。
@@ -117,12 +117,12 @@ sequenceDiagram
               * **失败记录**: 对于无法写入的批次或单条记录，将其写入本地文件 (`failed_logs.jsonl`) 或发送错误消息回主线程。**避免 Worker 因写入失败而崩溃**。
       * **重置定时器**: 如果队列中仍有日志，设置新的 `batchTimer = setTimeout(processBatch, BATCH_INTERVAL)`。
 
-4.  **定时处理**:
+4. **定时处理**:
 
       * 在 Worker 初始化时启动第一个定时器 `batchTimer = setTimeout(processBatch, BATCH_INTERVAL)`。
       * `processBatch` 函数在处理完后会根据队列情况重置定时器。
 
-5.  **优雅关闭**:
+5. **优雅关闭**:
 
       * 监听 `parentPort.once('close', async () => { ... })` 或主线程发送的特定关闭消息。
       * 在关闭前，调用 `processBatch()` 处理队列中剩余的所有日志。
@@ -132,31 +132,31 @@ sequenceDiagram
 
 ## 6. 数据格式与脱敏
 
-  * **数据传递**: 主线程与 Worker 之间传递序列化的 JSON 对象。
-  * **数据库存储**:
-      * `request_headers`, `response_headers`: 存储为 JSON 类型。在存入前，**必须**移除敏感头部，如 `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, 以及任何自定义的敏感头部。
-      * `request_body`, `response_body`: 存储为 `LONGTEXT`。需要考虑**截断**过大的报文以控制存储大小，或者在记录前进行脱敏处理（例如移除敏感字段）。**初步决定**: 存储完整报文，依赖数据库分区和定期清理策略管理大小。
-  * **错误处理**: `error_message` 存储为 TEXT，记录错误堆栈信息或关键错误消息。
+* **数据传递**: 主线程与 Worker 之间传递序列化的 JSON 对象。
+* **数据库存储**:
+  * `request_headers`, `response_headers`: 存储为 JSON 类型。在存入前，**必须**移除敏感头部，如 `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, 以及任何自定义的敏感头部。
+  * `request_body`, `response_body`: 存储为 `LONGTEXT`。需要考虑**截断**过大的报文以控制存储大小，或者在记录前进行脱敏处理（例如移除敏感字段）。**初步决定**: 存储完整报文，依赖数据库分区和定期清理策略管理大小。
+* **错误处理**: `error_message` 存储为 TEXT，记录错误堆栈信息或关键错误消息。
 
 ## 7. 性能与可靠性
 
-  * **性能**: Worker Thread 隔离了数据库写入延迟。批处理写入减少了数据库连接和事务开销。主线程的开销主要在于数据收集和 `postMessage` 调用，应保持较低。
-  * **可靠性**:
-      * Worker 内部队列处理写入失败和重试。
-      * 失败日志可记录到文件，便于后续排查或重新导入。
-      * 主线程需监控 Worker 状态，在 Worker 意外退出时尝试重启或记录严重错误。
-      * 数据库分区有助于 `request_logs` 表的长期维护和查询性能。
+* **性能**: Worker Thread 隔离了数据库写入延迟。批处理写入减少了数据库连接和事务开销。主线程的开销主要在于数据收集和 `postMessage` 调用，应保持较低。
+* **可靠性**:
+  * Worker 内部队列处理写入失败和重试。
+  * 失败日志可记录到文件，便于后续排查或重新导入。
+  * 主线程需监控 Worker 状态，在 Worker 意外退出时尝试重启或记录严重错误。
+  * 数据库分区有助于 `request_logs` 表的长期维护和查询性能。
 
 ## 8. 测试策略
 
-  * **单元测试**:
-      * Worker Thread 的消息接收、队列管理、批处理逻辑。
-      * 数据库写入的错误处理和重试逻辑。
-      * 主线程日志数据收集和格式化逻辑。
-      * 头部和 Body 的脱敏/截断逻辑。
-  * **集成测试**:
-      * 主线程发送消息 -\> Worker 接收 -\> 数据库成功写入的完整流程。
-      * 模拟数据库写入失败，验证 Worker 的重试和失败记录。
-      * 测试流式响应的完整 Body 是否能被正确捕获和记录。
-      * 测试高并发下系统是否稳定，日志是否丢失（允许少量因进程退出丢失）。
-      * 验证优雅关闭时，Worker 是否能处理完剩余队列。
+* **单元测试**:
+  * Worker Thread 的消息接收、队列管理、批处理逻辑。
+  * 数据库写入的错误处理和重试逻辑。
+  * 主线程日志数据收集和格式化逻辑。
+  * 头部和 Body 的脱敏/截断逻辑。
+* **集成测试**:
+  * 主线程发送消息 -\> Worker 接收 -\> 数据库成功写入的完整流程。
+  * 模拟数据库写入失败，验证 Worker 的重试和失败记录。
+  * 测试流式响应的完整 Body 是否能被正确捕获和记录。
+  * 测试高并发下系统是否稳定，日志是否丢失（允许少量因进程退出丢失）。
+  * 验证优雅关闭时，Worker 是否能处理完剩余队列。

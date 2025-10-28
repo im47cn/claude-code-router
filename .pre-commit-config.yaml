@@ -1,0 +1,58 @@
+# .pre-commit-config.yaml
+# ==============================================================================
+# 这是一个全面的 pre-commit 配置文件，适用于包含
+# Markdown, Java, 和 Vue.js (JavaScript/TypeScript) 的混合项目。
+# ==============================================================================
+# 1. 安装框架 (如果尚未安装):
+# brew install pre-commit || pip install pre-commit
+# 2. 进入你的项目根目录（包含 .pre-commit-config.yaml 的地方），然后运行：
+# pre-commit install
+
+repos:
+  # ------------------------------------------------------------------------------
+  # 通用钩子 (适用于所有项目)
+  # ------------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0 # 建议使用最新的稳定版本
+    hooks:
+      - id: trailing-whitespace # 自动修复行尾多余的空格
+      - id: end-of-file-fixer # 保证文件以一个空行结尾
+      - id: check-yaml # 检查 YAML 文件语法
+      - id: check-json # 检查 JSON 文件语法
+      - id: check-merge-conflict # 防止将合并冲突标记 (<<<<<, =====, >>>>>) 提交入库
+
+  # ------------------------------------------------------------------------------
+  # Markdown 格式化
+  # ------------------------------------------------------------------------------
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.45.0
+    hooks:
+      - id: markdownlint-fix # 使用 markdownlint 自动修复格式问题
+        args: [--config, .markdownlint.json]
+
+  # ------------------------------------------------------------------------------
+  # Vue / 前端项目格式化 (JavaScript, TypeScript, CSS, Vue)
+  # 使用 Prettier (代码格式化) 和 ESLint (代码质量和部分格式化)
+  # ------------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v4.0.0-alpha.8 # 使用支持插件的 Prettier v3+
+    hooks:
+      - id: prettier
+        types_or: [javascript, jsx, ts, tsx, css, scss, vue]
+        # 如果你的 Prettier 配置需要插件 (例如，为了排序 tailwind class)
+        # additional_dependencies:
+        # -   "prettier-plugin-tailwindcss"
+
+  - repo: https://github.com/pre-commit/mirrors-eslint
+    rev: v9.38.0
+    hooks:
+      - id: eslint
+        types_or: [javascript, jsx, ts, tsx, vue]
+        args: [--fix] # 告诉 ESLint 尝试自动修复问题
+        # ESLint 需要知道如何处理 Vue 文件，所以需要安装 vue 插件
+        additional_dependencies:
+          - eslint-plugin-vue@^9.0.0 # 使用与你的 ESLint 版本兼容的插件版本
+          # 根据你的项目配置，可能还需要:
+          # - typescript@^5.0.0
+          # - @typescript-eslint/parser@^7.0.0
+          # - @typescript-eslint/eslint-plugin@^7.0.0

@@ -14,7 +14,7 @@
 
 ## 2. 核心组件
 
-1.  **CCR 代理服务器**:
+1. **CCR 代理服务器**:
     * 基于 Fastify 的 Node.js 服务。
     * 监听来自 Claude Code (或其他客户端) 的请求。
     * 实现 `/v1/messages` 等核心 API 端点。
@@ -22,27 +22,27 @@
     * 管理 Worker Thread 池（目前只有一个用于日志）。
     * 提供用于 UI 配置和管理的 `/api/*` 端点。
     * 提供 UI 认证的 `/auth/*` 端点。
-2.  **配置系统**:
+2. **配置系统**:
     * 核心服务配置存储在 `~/.claude-code-router/config.json`。
     * 支持环境变量插值。
-3.  **LLM 路由模块 (`@musistudio/llms`)**:
+3. **LLM 路由模块 (`@musistudio/llms`)**:
     * 处理到不同 LLM 提供商的请求路由。
     * 包含内置的 `Transformers` 用于 API 格式适配。
     * 支持加载用户自定义 `Transformers`。
-4.  **数据库 (MySQL)**:
+4. **数据库 (MySQL)**:
     * 存储用户信息 (`users`, `user_identities`)。
     * 存储 API 密钥信息 (`api_keys`)。
     * 存储配额规则 (`user_quotas`, `api_key_quotas`)。
     * 存储详细请求日志 (`request_logs`)。
-5.  **异步日志 Worker**:
+5. **异步日志 Worker**:
     * 独立的 Node.js Worker Thread。
     * 负责从主线程接收日志数据并将其写入 MySQL。
-6.  **Web UI**:
+6. **Web UI**:
     * 基于 React, Vite, shadcn-ui, Tailwind CSS 的单页面应用。
     * 提供服务配置、Provider 管理、Router 配置、API Key 管理、用户配额管理（管理员）、历史记录查看等功能。
     * 通过 `/api/*` 与后端交互。
     * 支持飞书登录。
-7.  **命令行接口 (CLI)**:
+7. **命令行接口 (CLI)**:
     * `ccr start|stop|restart|status`: 服务管理。
     * `ccr code`: 通过 CCR 运行 Claude Code。
     * `ccr model`: 交互式模型配置。
@@ -62,9 +62,9 @@
 
 * **当前范围**: 实现上述所有核心组件和功能需求，包括飞书认证、API Key 管理、基于请求次数的配额、异步 MySQL 日志记录。
 * **未来可能**:
-    * 支持更多认证提供商 (GitHub, Email/Password)。
-    * 更复杂的配额类型 (Token 消耗, 并发请求数)。
-    * 基于日志的数据分析仪表盘。
-    * 更高级的路由策略（负载均衡、基于延迟的路由）。
-    * UI 主题定制。
-    * 插件系统 (超越 Transformers 的更广泛扩展)。
+  * 支持更多认证提供商 (GitHub, Email/Password)。
+  * 更复杂的配额类型 (Token 消耗, 并发请求数)。
+  * 基于日志的数据分析仪表盘。
+  * 更高级的路由策略（负载均衡、基于延迟的路由）。
+  * UI 主题定制。
+  * 插件系统 (超越 Transformers 的更广泛扩展)。
