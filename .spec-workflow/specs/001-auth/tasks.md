@@ -1,160 +1,203 @@
-# 认证与 API 密钥管理开发任务列表
+# 任务文档
 
-## 1. 概述
+- [ ] 1. 设置数据库模式和模型
+  - 文件: prisma/schema.prisma (修改现有文件)
+  - 定义 User, UserIdentity, ApiKey, UserQuota, ApiKeyQuota, RequestLog 模型
+  - 创建并运行数据库迁移
+  - 目的: 为认证系统建立数据持久化层
+  - _重用: 现有数据库配置, src/db/client.ts_
+  - _需求: 需求1, 需求2, 需求3_
+  - _提示: 角色: 专精Prisma和MySQL模式设计的数据库工程师 | 任务: 根据需求创建 User, UserIdentity, ApiKey, UserQuota, ApiKeyQuota, 和 RequestLog 模型的完整数据库模式，然后使用Prisma生成并应用迁移 | 限制: 必须遵循现有数据库模式，确保正确的外键关系，为性能添加必要的索引，维护数据完整性约束 | 成功: 模式正确定义所有必需字段，迁移成功执行，关系正确建立，性能索引就位_
 
-本文档将 `.spec-workflow/specs/auth/design.md` 中定义的认证与 API 密钥管理功能分解为具体的开发和测试任务。
+- [ ] 2. 创建认证类型和接口
+  - 文件: src/types/auth.ts
+  - 为 User, ApiKey, Quota 和认证相关数据结构定义TypeScript接口
+  - 扩展现有基础类型系统中的基础接口
+  - 目的: 为认证实现建立类型安全
+  - _重用: src/types/ 中的现有类型定义_
+  - _需求: 需求1, 需求2, 需求4_
+  - _提示: 角色: 专精类型系统和安全接口的TypeScript开发人员 | 任务: 为认证数据结构创建全面的TypeScript接口，包括 User, ApiKey, Quota 和相关类型，扩展现有基础类型模式 | 限制: 必须维护类型安全，遵循现有命名约定，确保接口与数据库模式对齐，支持所有认证流程 | 成功: 所有接口编译无错误，为认证功能提供适当的类型覆盖，接口与数据库模型和API合约对齐_
 
-## 2. 前置任务 (基础设施)
+- [ ] 3. 实现API密钥生成和验证服务
+  - 文件: src/auth/apiKey.ts
+  - 创建具有高熵和sk-前缀的API密钥生成
+  - 实现bcrypt哈希和恒定时间比较
+  - 添加密钥前缀提取用于缓存优化
+  - 目的: 提供安全的API密钥管理功能
+  - _重用: 现有加密工具, src/utils/cache.ts_
+  - _需求: 需求2, 需求5_
+  - _提示: 角色: 专精密码学和认证系统的安全工程师 | 任务: 实现安全的API密钥生成、bcrypt哈希和恒定时间比较验证逻辑，包括密钥前缀提取用于缓存优化 | 限制: 必须使用加密安全的随机生成，实施适当的bcrypt加盐，确保恒定时间比较防止时序攻击，遵循安全最佳实践 | 成功: API密钥以足够熵生成，哈希安全且加盐，验证防止时序攻击，密钥提取支持缓存策略_
 
-* **AUTH-TASK-001**: **[DB Setup]** 初始化 Prisma (或选定的 ORM/Query Builder)。
-  * **Desc**: 安装依赖 (`prisma`, `@prisma/client` 或对应库)，初始化 Prisma (`npx prisma init`)。
-  * **Dev**: Backend Team
-  * **Test**: N/A (集成测试覆盖)
-* **AUTH-TASK-002**: **[DB Migration]** 根据 Schema 设计创建并执行数据库迁移。
-  * **Desc**: 在 `prisma/schema.prisma` 中定义 `User`, `UserIdentity`, `ApiKey` 模型，生成并应用迁移 (`npx prisma migrate dev --name init-auth-models`)。
-  * **Dev**: Backend Team
-  * **Test**: N/A (集成测试覆盖)
-* **AUTH-TASK-003**: **[Backend Setup]** 安装并配置 `bcrypt` (或 `argon2`) 用于哈希。
-  * **Dev**: Backend Team
-  * **Test**: N/A
-* **AUTH-TASK-004**: **[Backend Setup]** 安装并配置 `@fastify/session` 和 `@fastify/cookie` (或 `jsonwebtoken`)。
-  * **Desc**: 配置 session secret, cookie 选项等。
-  * **Dev**: Backend Team
-  * **Test**: N/A
-* **AUTH-TASK-005**: **[Backend Setup]** 设置内存缓存 (`lru-cache`) 实例用于缓存 API Key 和配额规则。
-  * **Desc**: 创建共享的缓存实例或模块 (`src/utils/cache.ts` 可扩展)。
-  * **Dev**: Backend Team
-  * **Test**: N/A
+- [ ] 4. 创建认证中间件
+  - 文件: src/middleware/auth.ts
+  - 实现用于API密钥验证的Fastify preHandler钩子
+  - 添加用户信息附加到请求对象
+  - 处理认证错误并提供适当的HTTP状态码
+  - 目的: 通过认证检查保护API端点
+  - _重用: 现有Fastify实例, src/auth/apiKey.ts_
+  - _需求: 需求2_
+  - _提示: 角色: 专精Fastify中间件和认证流程的后端开发人员 | 任务: 创建Fastify preHandler中间件，集成API密钥验证，将用户信息附加到请求，并处理具有适当HTTP状态码的认证错误 | 限制: 必须与现有Fastify设置无缝集成，处理所有认证失败场景，维护请求处理性能，提供不暴露敏感信息的清晰错误响应 | 成功: 中间件成功保护端点，正确验证API密钥，正确附加用户上下文，使用适当HTTP响应处理所有错误场景_
 
-## 3. API Key 认证与核心逻辑
+- [ ] 5. 实现配额检查服务
+  - 文件: src/services/quotaService.ts
+  - 创建用户级和API密钥级配额验证
+  - 实现基于时间窗口的请求计数
+  - 添加配额规则和计数器的缓存
+  - 目的: 强制执行请求限制以防止滥用
+  - _重用: 现有数据库连接, src/utils/cache.ts_
+  - _需求: 需求3_
+  - _提示: 角色: 专精速率限制和缓存策略的后端开发人员 | 任务: 实现全面的配额检查服务，支持用户级和API密钥级限制，具有基于时间窗口的计数和缓存以提高性能 | 限制: 必须确保准确的配额强制执行，处理时间窗口边界等边缘情况，实施高效的缓存策略，在分布式请求中维护一致性 | 成功: 配额强制执行准确且高性能，时间窗口处理正确，缓存在不牺牲准确性的前提下提高性能，边缘情况得到适当处理_
 
-* **AUTH-TASK-101**: **[Backend Dev]** 实现 API Key 生成逻辑。
-  * **Desc**: 在 `src/auth/apiKey.ts` 中创建函数生成高熵 Key 字符串 (带 `sk-` 前缀) 和前缀 (`key_prefix`)。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-151
-* **AUTH-TASK-102**: **[Backend Dev]** 实现 API Key 哈希逻辑。
-  * **Desc**: 在 `src/auth/apiKey.ts` 中创建函数使用 `bcrypt.hash()` 计算 `key_hash`。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-152
-* **AUTH-TASK-103**: **[Backend Dev]** 实现 API Key 验证逻辑。
-  * **Desc**: 在 `src/auth/apiKey.ts` 中创建函数，接收原始 Key，提取前缀，查询数据库（含缓存），使用 `bcrypt.compare()` 进行验证。返回 `{ isValid: boolean, userId?: number, apiKeyId?: number }`。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-153
-* **AUTH-TASK-104**: **[Backend Refactor]** 重构 `src/middleware/auth.ts` (`preHandler` 钩子)。
-  * **Desc**: 移除旧的全局 APIKEY 检查。集成新的 API Key 验证逻辑 (调用 AUTH-TASK-103)。验证通过后，查询用户信息并附加 `req.user` 和 `req.api_key_id`。处理无效 Key、禁用 Key、禁用用户等情况，返回 401 或 403。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-154 (集成测试)
-* **AUTH-TASK-105**: **[Backend Dev]** 在 `preHandler` 钩子中集成配额检查逻辑。
-  * **Desc**: 在 API Key 验证成功后，调用 `QuotaService` (待实现) 进行用户和 Key 配额检查。超限时返回 429。
-  * **Depends**: QUOTA-TASK-101 (QuotaService 实现)
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-155 (集成测试), QUOTA-TASK-151
-* **AUTH-TASK-151**: **[Backend Test]** 单元测试 API Key 生成逻辑。
-  * **Desc**: 验证生成的 Key 格式、唯一性（理论上）和前缀。
-  * **Dev**: Backend Team
-* **AUTH-TASK-152**: **[Backend Test]** 单元测试 API Key 哈希和比较逻辑。
-  * **Desc**: 确保 `hash` 和 `compare` 函数按预期工作。
-  * **Dev**: Backend Team
-* **AUTH-TASK-153**: **[Backend Test]** 单元测试 API Key 验证逻辑。
-  * **Desc**: Mock 数据库/缓存，测试有效 Key、无效 Key、错误前缀、不同哈希算法（如果支持多种）等场景。
-  * **Dev**: Backend Team
-* **AUTH-TASK-154**: **[Backend Test]** 集成测试 `preHandler` 钩子的 API Key 认证部分。
-  * **Desc**: 模拟 API 请求（带/不带 Key，有效/无效 Key），验证是否正确处理认证、附加用户信息或返回错误。
-  * **Dev**: Backend Team
-* **AUTH-TASK-155**: **[Backend Test]** 集成测试 `preHandler` 钩子的配额检查部分（与 AUTH-TASK-105 关联）。
-  * **Desc**: 模拟 API 请求，配合 Mock 的配额服务或数据库状态，验证配额检查逻辑是否按预期工作（通过/拒绝 429）。
-  * **Dev**: Backend Team
+- [ ] 6. 创建飞书OAuth服务
+  - 文件: src/auth/feishu.ts
+  - 实现具有state参数的OAuth URL生成
+  - 添加具有代码交换和用户信息检索的回调处理
+  - 包括用户创建/查找和会话管理
+  - 目的: 通过飞书平台启用用户认证
+  - _重用: 现有HTTP客户端, 会话管理系统_
+  - _需求: 需求1_
+  - _提示: 角色: 专精OAuth2流程和第三方集成的后端开发人员 | 任务: 实现完整的飞书OAuth服务，包括具有CSRF保护的URL生成、具有令牌交换的回调处理、用户信息检索和会话管理 | 限制: 必须遵循OAuth2安全最佳实践，正确处理state参数进行CSRF保护，安全存储飞书凭证，优雅处理OAuth错误，管理用户创建和会话生命周期 | 成功: OAuth流程安全且完整，实施CSRF保护，正确检索和存储用户信息，会话管理正确_
 
-## 4. API Key 管理 API
+- [ ] 7. 实现认证API端点
+  - 文件: src/api/auth.ts
+  - 创建 /auth/feishu 重定向端点
+  - 添加 /auth/feishu/callback 处理器
+  - 实现 /auth/logout 端点
+  - 添加 /api/me 端点用于当前用户信息
+  - 目的: 为认证操作提供HTTP接口
+  - _重用: 现有API结构, src/auth/feishu.ts, Fastify session_
+  - _需求: 需求1, 需求4_
+  - _提示: 角色: 专精REST端点和认证流程的API开发人员 | 任务: 创建全面的认证API端点，包括飞书OAuth重定向、回调处理、登出和用户信息检索，遵循REST约定和安全实践 | 限制: 必须遵循现有API模式，实施适当的错误处理，确保会话安全，处理OAuth state验证，提供清晰的响应格式 | 成功: 所有认证端点正常工作，OAuth流程正确实施，会话安全，用户信息准确检索和返回_
 
-* **AUTH-TASK-201**: **[Backend Dev]** 实现 `POST /api/keys` 端点 (创建 Key)。
-  * **Desc**: 调用 Key 生成和哈希逻辑，存入数据库，返回**完整原始 Key**及元数据。需 Session/JWT 验证用户身份。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-251
-* **AUTH-TASK-202**: **[Backend Dev]** 实现 `GET /api/keys` 端点 (获取 Keys)。
-  * **Desc**: 查询数据库获取当前用户的 Keys 列表（不含 `key_hash`），关联配额信息。需 Session/JWT 验证。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-252
-* **AUTH-TASK-203**: **[Backend Dev]** 实现 `PUT /api/keys/{keyId}` 端点 (更新 Key)。
-  * **Desc**: 更新 Key 的 `name` 或 `is_active` 状态。验证 Key 归属。更新缓存。需 Session/JWT 验证。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-253
-* **AUTH-TASK-204**: **[Backend Dev]** 实现 `DELETE /api/keys/{keyId}` 端点 (删除 Key)。
-  * **Desc**: 删除 Key 记录及关联配额。验证 Key 归属。失效缓存。需 Session/JWT 验证。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-254
-* **AUTH-TASK-251**: **[Backend Test]** 集成测试 `POST /api/keys`。
-  * **Desc**: 模拟请求，验证 Key 是否正确创建、存储（哈希），原始 Key 是否仅返回一次。
-  * **Dev**: Backend Team
-* **AUTH-TASK-252**: **[Backend Test]** 集成测试 `GET /api/keys`。
-  * **Desc**: 模拟请求，验证返回的列表是否正确、是否包含敏感信息。
-  * **Dev**: Backend Team
-* **AUTH-TASK-253**: **[Backend Test]** 集成测试 `PUT /api/keys/{keyId}`。
-  * **Desc**: 模拟请求，验证更新操作是否成功、权限是否控制、缓存是否失效。
-  * **Dev**: Backend Team
-* **AUTH-TASK-254**: **[Backend Test]** 集成测试 `DELETE /api/keys/{keyId}`。
-  * **Desc**: 模拟请求，验证删除操作是否成功、权限是否控制、缓存是否失效。
-  * **Dev**: Backend Team
+- [ ] 8. 创建API密钥管理端点
+  - 文件: src/api/keys.ts
+  - 实现用于密钥创建的 POST /api/keys
+  - 添加用于密钥列表的 GET /api/keys
+  - 创建用于密钥更新的 PUT /api/keys/{keyId}
+  - 添加用于密钥删除的 DELETE /api/keys/{keyId}
+  - 目的: 为API密钥管理提供CRUD接口
+  - _重用: 现有API模式, src/auth/apiKey.ts, 数据库模型_
+  - _需求: 需求3_
+  - _提示: 角色: 专精CRUD操作和安全的API开发人员 | 任务: 实现完整的API密钥管理端点，具有适当的验证、安全检查和错误处理，确保密钥仅在创建时返回且此后得到适当管理 | 限制: 必须验证用户权限，创建后绝不暴露完整API密钥，实施适当的输入验证，处理密钥未找到或权限被拒绝等边缘情况，维护数据一致性 | 成功: 所有CRUD操作安全工作，API密钥得到适当保护，用户权限得到强制执行，输入验证防止无效数据，错误处理全面_
 
-## 5. UI 认证与 Key 管理界面
+- [ ] 9. 实现API密钥配额管理端点
+  - 文件: src/api/quotas.ts
+  - 创建用于设置密钥配额的 PUT /api/keys/{keyId}/quota
+  - 添加用于移除配额的 DELETE /api/keys/{keyId}/quota
+  - 包括配额验证和冲突检查
+  - 目的: 为管理API密钥速率限制提供接口
+  - _重用: src/services/quotaService.ts, 现有API模式_
+  - _需求: 需求3_
+  - _提示: 角色: 专精细速率限制和配置管理的API开发人员 | 任务: 创建设置和移除API密钥配额的API端点，具有适当的验证、冲突检查和配额服务集成 | 限制: 必须验证配额参数，防止无效配额配置，确保与配额检查服务的正确集成，安全处理并发配额修改 | 成功: 配额端点正确管理速率限制，验证防止无效配置，与配额服务集成无缝，并发修改得到安全处理_
 
-* **AUTH-TASK-301**: **[Frontend Dev]** 创建登录页面 (`LoginPage.tsx`)。
-  * **Desc**: 包含“使用飞书登录”按钮，点击后跳转到 `/auth/feishu`。处理未登录状态的重定向。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-351 (E2E)
-* **AUTH-TASK-302**: **[Frontend Dev]** 实现前端路由保护 (`ProtectedRoute.tsx`, `PublicRoute.tsx`)。
-  * **Desc**: 根据登录状态（检查 Session Cookie 或 JWT）控制页面访问。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-351 (E2E)
-* **AUTH-TASK-303**: **[Frontend Dev]** 实现获取当前用户状态 (`useAuth` hook 或 Context)。
-  * **Desc**: 调用 `/api/me` 获取用户信息，管理前端登录状态。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-351 (E2E)
-* **AUTH-TASK-304**: **[Frontend Dev]** 创建 API Key 管理页面 (`ApiKeyManagementPage.tsx`)。
-  * **Desc**: 展示 Key 列表 (调用 AUTH-TASK-202 API)，包含创建、编辑(名称/状态)、删除按钮。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-352 (E2E)
-* **AUTH-TASK-305**: **[Frontend Dev]** 实现创建 API Key 弹窗/流程。
-  * **Desc**: 调用 AUTH-TASK-201 API，**一次性**显示生成的 Key 并提示用户保存。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-352 (E2E)
-* **AUTH-TASK-306**: **[Frontend Dev]** 实现编辑 API Key 弹窗/流程 (名称/状态)。
-  * **Desc**: 调用 AUTH-TASK-203 API。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-352 (E2E)
-* **AUTH-TASK-307**: **[Frontend Dev]** 实现删除 API Key 确认流程。
-  * **Desc**: 调用 AUTH-TASK-204 API。
-  * **Dev**: Frontend Team
-  * **Test**: AUTH-TASK-352 (E2E)
-* **AUTH-TASK-351**: **[Frontend Test]** E2E 测试 UI 登录/登出流程。
-  * **Desc**: 模拟飞书回调，验证登录状态、重定向、用户信息显示。
-  * **Dev**: Frontend Team / QA
-* **AUTH-TASK-352**: **[Frontend Test]** E2E 测试 API Key 管理界面的 CRUD 操作。
-  * **Desc**: 覆盖创建、显示（不显示完整 Key）、编辑、删除 Key 的流程。
-  * **Dev**: Frontend Team / QA
+- [ ] 10. 创建登录页面组件
+  - 文件: ui/src/pages/LoginPage.tsx
+  - 实现具有重定向处理的飞书登录按钮
+  - 添加加载状态和错误处理
+  - 包括响应式设计和可访问性
+  - 目的: 为认证提供用户界面
+  - _重用: 现有UI组件, ui/src/components/, ui/src/hooks/_
+  - _需求: 需求1_
+  - _提示: 角色: 专精React和认证UI的前端开发人员 | 任务: 创建具有飞书OAuth集成的全面登录页面，包括加载状态、错误处理、响应式设计和可访问性功能 | 限制: 必须遵循现有UI模式和主题系统，实施适当的错误状态，确保可访问性合规，正确处理重定向流程，提供良好的用户反馈 | 成功: 登录界面直观且可访问，OAuth流程无缝工作，错误状态用户友好，响应式设计在各种设备上工作，满足可访问性标准_
 
-## 6. 飞书 OAuth 集成 (待定细节)
+- [ ] 11. 实现API密钥管理界面
+  - 文件: ui/src/pages/ApiKeyManagementPage.tsx
+  - 创建具有状态和元数据显示的密钥列表
+  - 添加具有一次性显示的密钥创建模态框
+  - 实现密钥编辑（名称/状态）和删除流程
+  - 目的: 为API密钥操作提供用户界面
+  - _重用: 现有UI组件, ui/src/components/, ui/src/hooks/_
+  - _需求: 需求3_
+  - _提示: 角色: 专精数据管理界面和安全UI的前端开发人员 | 任务: 创建具有安全密钥创建、列表、编辑和删除流程的全面API密钥管理界面，包括一次性密钥显示等适当安全考虑 | 限制: 必须确保创建后绝不完全显示API密钥，为破坏性操作实施确认对话框，遵循现有UI模式，提供清晰的状态指示器，适当处理加载和错误状态 | 成功: 界面提供安全直观的密钥管理，密钥通过一次性显示得到适当保护，用户操作有适当的确认，界面遵循既定设计模式_
 
-* **AUTH-TASK-401**: **[Backend Dev]** 实现 `/auth/feishu` 端点 (重定向)。
-  * **Desc**: 生成授权 URL，存储 state。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-451 (集成)
-* **AUTH-TASK-402**: **[Backend Dev]** 实现 `/auth/feishu/callback` 端点 (回调处理)。
-  * **Desc**: 验证 state，获取 token 和用户信息，查找/创建用户，设置 Session/JWT，重定向。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-451 (集成)
-* **AUTH-TASK-403**: **[Backend Dev]** 实现 `/auth/logout` 端点。
-  * **Desc**: 清除 Session/JWT。
-  * **Dev**: Backend Team
-  * **Test**: AUTH-TASK-451 (集成)
-* **AUTH-TASK-451**: **[Backend Test]** 集成测试飞书 OAuth 流程。
-  * **Desc**: Mock 飞书 API 响应，测试完整的登录、回调、用户创建/查找、Session/JWT 设置流程。
-  * **Dev**: Backend Team
+- [ ] 12. 创建认证上下文和钩子
+  - 文件: ui/src/contexts/AuthContext.tsx, ui/src/hooks/useAuth.ts
+  - 实现认证状态管理
+  - 添加登录/登出功能和用户会话处理
+  - 创建受保护的路由组件
+  - 目的: 管理前端认证状态和路由
+  - _重用: 现有上下文模式, ui/src/contexts/, ui/src/hooks/_
+  - _需求: 需求1, 需求4_
+  - _提示: 角色: 专精React上下文和认证状态管理的前端开发人员 | 任务: 创建具有适当状态管理、登录/登出功能、会话处理和受保护路由组件的认证上下文系统 | 限制: 必须遵循现有上下文模式，优雅处理会话过期，提供适当的加载状态，实施安全令牌存储，确保路由保护正常工作 | 成功: 认证状态管理得当，登录/登出流程正常工作，会话处理安全，受保护路由防止未授权访问，用户体验流畅_
 
-## 7. 依赖关系
+- [ ] 13. 为认证服务创建单元测试
+  - 文件: tests/auth/apiKey.test.ts, tests/auth/feishu.test.ts
+  - 测试API密钥生成、哈希和验证
+  - 添加具有模拟依赖的OAuth服务功能测试
+  - 包括边缘情况和错误场景
+  - 目的: 确保认证逻辑可靠性
+  - _重用: 现有测试工具, tests/helpers/_
+  - _需求: 需求2, 需求5_
+  - _提示: 角色: 专精单元测试和安全测试的QA工程师 | 任务: 为认证服务创建全面的单元测试，覆盖API密钥操作、OAuth功能和具有适当模拟和安全考虑的边缘情况 | 限制: 必须模拟所有外部依赖，测试成功和失败场景，覆盖安全边缘情况，确保测试隔离且可重复，达到高代码覆盖率 | 成功: 所有认证功能经过彻底测试，覆盖安全场景，处理边缘情况，测试为认证可靠性提供信心_
 
-* API Key 认证 (AUTH-TASK-104) 依赖 Key 生成/哈希/验证 (AUTH-TASK-101, 102, 103)。
-* `preHandler` 配额检查 (AUTH-TASK-105) 依赖配额服务的实现 (QUOTA-TASK-XXX)。
-* API Key 管理 API (AUTH-TASK-2xx) 依赖核心 Key 逻辑 (AUTH-TASK-1xx) 和 Session/JWT 验证。
-* UI 任务 (AUTH-TASK-3xx) 依赖对应的后端 API 实现。
-* 飞书 OAuth (AUTH-TASK-4xx) 依赖 Session/JWT 设置 (AUTH-TASK-004) 和用户数据库模型 (AUTH-TASK-002)。
+- [ ] 14. 为API端点创建集成测试
+  - 文件: tests/api/auth.test.ts, tests/api/keys.test.ts
+  - 测试完整认证流程
+  - 添加API密钥管理CRUD测试
+  - 包括配额管理集成测试
+  - 目的: 确保API端点与数据库正常工作
+  - _重用: 现有测试数据库设置, tests/helpers/_
+  - _需求: 所有需求_
+  - _提示: 角色: 专精API集成测试和数据库测试的QA工程师 | 任务: 为所有认证和密钥管理API端点创建全面的集成测试，包括数据库交互和完整的请求-响应周期 | 限制: 必须使用具有适当设置/清理的测试数据库，使用各种输入场景测试所有端点，验证数据库状态更改，在测试中正确处理认证，确保测试隔离 | 成功: 所有API端点端到端测试，数据库操作正常工作，认证流程得到验证，错误场景得到适当处理_
+
+- [ ] 15. 为用户流程创建端到端测试
+  - 文件: tests/e2e/auth.test.ts
+  - 测试从UI到API的完整登录流程
+  - 添加API密钥管理UI测试
+  - 包括配额配置和验证
+  - 目的: 确保完整用户工作流程正常运行
+  - _重用: 现有E2E测试设置, tests/e2e/_
+  - _需求: 所有需求_
+  - _提示: 角色: 专精端到端测试和用户旅程验证的QA自动化工程师 | 任务: 创建涵盖完整用户旅程的全面E2E测试，包括从用户界面角度的登录、API密钥管理和配额配置 | 限制: 必须测试真实用户工作流程，避免测试实现细节，确保测试可维护且可靠，适当处理外部依赖，模拟真实用户行为 | 成功: 完整用户工作流程从头到尾正常工作，UI交互如预期，后端集成无缝，用户体验端到端得到验证_
+
+- [ ] 16. 实施安全测试和验证
+  - 文件: tests/security/authSecurity.test.ts
+  - 测试API密钥安全（无泄漏、适当哈希）
+  - 添加会话安全验证
+  - 包括速率限制和配额强制执行测试
+  - 目的: 验证安全措施有效
+  - _重用: 现有安全测试模式_
+  - _需求: 需求5_
+  - _提示: 角色: 专精渗透测试和安全验证的安全工程师 | 任务: 创建全面的安全测试以验证API密钥保护、会话安全、速率限制有效性和其他认证安全措施 | 限制: 必须测试常见安全漏洞，验证对时序攻击的保护，测试速率限制绕过尝试，确保无敏感数据泄漏，验证会话安全实施 | 成功: 安全措施有效防护常见漏洞，速率限制不易被绕过，敏感数据得到适当保护，会话安全，认证系统满足安全要求_
+
+## 原始文档的附加内容
+
+### 任务依赖关系和关联
+
+**前置条件:**
+- 数据库模式（任务1）必须在所有其他任务之前完成
+- 认证类型（任务2）必须在服务实现之前完成
+
+**核心认证流程:**
+- API密钥服务（任务3）→ 认证中间件（任务4）→ API端点（任务7, 8, 9）
+- 配额服务（任务5）必须与认证中间件（任务4）集成
+
+**前端集成:**
+- 认证上下文（任务12）→ 登录页面（任务10）→ API密钥管理（任务11）
+- 前端组件依赖于相应的后端API端点
+
+**测试策略:**
+- 单元测试（任务13）可与实现并行开发
+- 集成测试（任务14）需要完成的API端点
+- 端到端测试（任务15）需要前端和后端都完成
+- 安全测试（任务16）应在实现完成后执行
+
+### 实施说明
+
+**配置要求:**
+- 飞书OAuth应用凭证必须安全配置
+- 会话密钥和cookie设置需要适当配置
+- 数据库连接和缓存配置必须支持认证系统
+- 速率限制参数应按部署可配置
+
+**性能考虑:**
+- API密钥验证应通过缓存优化
+- 配额检查的数据库查询应高效
+- 会话存储应支持预期用户负载
+- 速率限制不应显著影响合法用户
+
+**安全考虑:**
+- API密钥绝不能被记录或在错误消息中暴露
+- 会话cookie应使用安全标志和HttpOnly
+- 必须为OAuth state实施CSRF保护
+- 速率限制应防止滥用和意外过度使用

@@ -1,148 +1,301 @@
-# 认证与 API 密钥管理设计文档
+# 设计文档
 
-## 1. 概述
+## 概述
 
-本文档详细描述了 `claude-code-router` 用户认证（基于飞书 OAuth）、API 密钥认证以及 API 密钥管理功能的技术设计方案。设计遵循 `.spec-workflow/specs/auth/requirements.md` 中定义的需求。
+本文档详细描述了 `claude-code-router` 用户认证（基于飞书 OAuth）、API 密钥认证以及 API 密钥管理功能的技术设计方案。该设计实现了一个安全的、基于角色的访问控制系统，允许用户通过飞书登录并管理自己的 API 密钥以访问路由服务。
 
-## 2. 技术选型
+## 指导文档对齐
 
-* **数据库**: MySQL (Schema 见 Schema 设计文档)
-* **ORM/Query Builder**: Prisma (推荐)
-* **后端框架**: Fastify
-* **异步日志**: Node.js Worker Threads
-* **API Key 哈希**: bcrypt
-* **UI 认证状态**: Fastify Session (`@fastify/session` + `@fastify/cookie`) - 假设部署环境支持 Session 存储，如果需要无状态或分布式部署，可改为 JWT。
-* **缓存**: `lru-cache` (内存缓存)
+### 技术标准 (tech.md)
 
-## 3. 核心流程设计
+本设计严格遵循 tech.md 中定义的技术栈选择：
+- **数据库**: 使用 MySQL 进行用户、API密钥和配额数据的持久化存储
+- **ORM/Query Builder**: 采用 Prisma 提供类型安全的数据库交互
+- **后端框架**: 基于 Fastify 构建高性能的认证和API服务
+- **异步日志**: 使用 Node.js Worker Threads 实现非阻塞的日志记录
+- **API Key 哈希**: 采用 bcrypt 进行安全的密钥哈希存储
+- **UI 认证状态**: 使用 Fastify Session 进行会话管理
+- **缓存**: 使用 `lru-cache` 实现内存缓存以提升性能
 
-### 3.1 UI 用户认证流程 (飞书 OAuth)
+### 项目结构 (structure.md)
 
-1. **前端**: 用户点击“使用飞书登录”按钮。
-2. **前端**: 重定向到后端 `/auth/feishu` 端点。
-3. **后端 (`/auth/feishu`)**:
-    * 生成飞书 OAuth2 授权请求 URL（包含 App ID, Redirect URI, Scope, State）。
-    * 将 `state` 参数存储在 Session 中以防止 CSRF。
-    * 重定向用户到飞书授权页面。
-4. **飞书**: 用户授权。
-5. **飞书**: 重定向用户到后端回调 URL `/auth/feishu/callback`，附带 `code` 和 `state` 参数。
-6. **后端 (`/auth/feishu/callback`)**:
-    * 验证 `state` 参数与 Session 中存储的是否一致。
-    * 使用 `code` 向飞书请求 Access Token。
-    * 使用 Access Token 向飞书请求用户信息（用户 ID, 姓名, 头像等）。
-    * **数据库交互**:
-        * 根据 `feishu_user_id` 在 `user_identities` 表中查找记录。
-        * **如果找到**: 获取关联的 `user_id`。查询 `users` 表获取用户信息。
-        * **如果未找到**:
-            * 在 `users` 表中创建新用户记录（设置 `name`, `avatar_url`, `is_active=true`, `is_admin=false`）。
-            * 在 `user_identities` 表中创建新记录，关联新用户的 `id` 和飞书信息 (`provider='feishu'`, `provider_user_id`)。
-        * **更新用户信息 (可选)**: 可以根据飞书返回的最新信息更新 `users` 表中的 `name` 和 `avatar_url`。
-    * **Session/JWT**: 将用户 `id`, `name`, `is_admin`, `is_active` 等必要信息存储在 Session (或生成 JWT)。
-    * 重定向用户到前端 UI 主页 (`/ui/` 或 `/dashboard`)。
-7. **前端**: 接收到重定向，应用根据 Session/JWT 状态识别为已登录用户。
+实现遵循 structure.md 中定义的目录结构：
+- **`src/auth/`**: 包含飞书OAuth、API密钥生成和验证逻辑
+- **`src/middleware/`**: 实现认证和配额检查的Fastify钩子
+- **`src/services/`**: 封装配额检查、API密钥管理等业务逻辑
+- **`src/db/`**: 使用Prisma客户端进行数据库交互
+- **`src/api/`**: 实现认证相关的API端点
 
-### 3.2 API 密钥认证流程 (`preHandler` 钩子)
+## 代码重用分析
 
-1. **提取 Key**: 从 `Authorization: Bearer <KEY>` 或 `X-Api-Key: <KEY>` 请求头获取原始 API Key 字符串。如果都缺失，返回 401。
-2. **基本校验**: 检查 Key 格式是否符合预期（例如，必须以 `sk-` 开头，长度符合要求）。
-3. **提取前缀**: 获取 Key 的前缀 `key_prefix` (例如，`sk-` 加上随后的 4-6 位字符)。
-4. **缓存查询**: 尝试从内存缓存中根据 `key_prefix` 查找可能的 Key 列表 `CacheEntry = { id, user_id, key_hash, is_active }[]`。
-5. **数据库查询 (缓存未命中或需验证)**:
-    * 如果缓存未命中，查询 `api_keys` 表 `WHERE key_prefix = ? AND is_active = true`。
-    * 将查询结果（`id`, `user_id`, `key_hash`, `is_active`）存入缓存。
-6. **哈希比较**:
-    * 遍历缓存或数据库查询结果中的 Key 记录。
-    * 对传入的原始 API Key 使用 `bcrypt.compare()` (或 Argon2 对应函数) 与每个记录的 `key_hash` 进行比较。**必须使用库提供的比较函数以实现恒定时间比较**。
-    * 如果找到匹配的哈希且 `is_active` 为 true，则认证成功。记录 `api_key_id` 和 `user_id`。
-    * 如果遍历完所有前缀匹配的 Key 仍未找到匹配项，返回 401。
-7. **用户信息与配额查询**:
-    * 使用 `user_id` 从缓存或数据库 (`users` 表) 获取用户信息 (`is_active`, `is_admin`)。如果用户 `is_active` 为 false，返回 403 Forbidden。
-    * **用户配额检查**:
-        * 从缓存或数据库 (`user_quotas` 表) 获取用户配额规则 (`limit`, `interval_minutes`)。
-        * 如果规则存在，查询 `request_logs` 表 `COUNT(*) WHERE user_id = ? AND status = 'success' AND request_timestamp >= NOW() - INTERVAL ? MINUTE`。
-        * 如果计数 `>= limit`，记录拒绝日志（通过 Worker Thread），返回 429。
-    * **API Key 配额检查**:
-        * 从缓存或数据库 (`api_key_quotas` 表) 获取 Key 配额规则 (`limit`, `interval_minutes`)。
-        * 如果规则存在，查询 `request_logs` 表 `COUNT(*) WHERE api_key_id = ? AND status = 'success' AND request_timestamp >= NOW() - INTERVAL ? MINUTE`。
-        * 如果计数 `>= limit`，记录拒绝日志（通过 Worker Thread），返回 429。
-8. **附加信息**: 将用户信息 (`req.user = { id: user_id, is_admin: ... }`) 和 `req.api_key_id = api_key_id` 附加到 Fastify 请求对象。
-9. **更新 `last_used_at` (可选)**: 可以考虑异步更新 `api_keys` 表的 `last_used_at` 字段（例如通过日志 Worker 或单独的低优先级任务），以避免阻塞认证流程。
-10. **调用 `done()`**: 继续处理请求。
+### 要利用的现有组件
 
-### 3.3 API 密钥管理流程 (UI -> 后端 API)
+- **Fastify Framework**: 现有的 Fastify 服务器实例将用于注册认证中间件和路由
+- **@musistudio/llms**: 现有的路由系统将集成认证中间件来保护核心API端点
+- **Configuration System**: 现有的配置加载机制将扩展以支持认证相关的配置项
 
-* **创建 Key (`POST /api/keys`)**:
-    1. 后端接收用户 ID (从 Session/JWT) 和可选的 Key 名称。
-    2. 生成一个新的、唯一的、高熵的 API Key 字符串 (例如，使用 `crypto.randomBytes` 生成 32 字节，然后 Base64 编码，加上 `sk-` 前缀)。
-    3. 提取 `key_prefix`。
-    4. 使用 `bcrypt.hash()` 计算 `key_hash`。
-    5. **数据库交互**: 在 `api_keys` 表中插入新记录 (`user_id`, `key_hash`, `key_prefix`, `name`, `is_active=true`)。
-    6. **返回**: 将**完整的、原始的** API Key 字符串**仅在此次响应中**返回给前端，同时返回 Key 的 ID 和其他元数据（如前缀、名称、创建时间）。前端必须明确提示用户立即保存 Key。
-* **获取 Keys (`GET /api/keys`)**:
-    1. 后端接收用户 ID。
-    2. **数据库交互**: 查询 `api_keys` 表 `WHERE user_id = ?`，连接 `api_key_quotas` 表获取配额信息。
-    3. **返回**: 返回 Key 列表，包含 `id`, `name`, `key_prefix`, `is_active`, `created_at`, `last_used_at`, `quota_limit`, `quota_interval_minutes`。**绝不返回 `key_hash` 或原始 Key**。
-* **更新 Key (`PUT /api/keys/{keyId}`)**:
-    1. 后端接收用户 ID 和 `keyId`，以及要更新的字段（`name`, `is_active`）。
-    2. **数据库交互**: 验证 Key 是否属于该用户。更新 `api_keys` 表中对应 `id` 的记录。
-    3. **缓存**: 如果更新了 `is_active`，需要使相关缓存失效。
-    4. **返回**: 返回更新后的 Key 信息（不含敏感数据）。
-* **删除 Key (`DELETE /api/keys/{keyId}`)**:
-    1. 后端接收用户 ID 和 `keyId`。
-    2. **数据库交互**: 验证 Key 是否属于该用户。从 `api_keys` 表中删除对应记录 (或标记为已删除)。同时删除关联的 `api_key_quotas` 记录。
-    3. **缓存**: 使相关缓存失效。
-    4. **返回**: 返回 204 No Content。
-* **设置/更新 Key 配额 (`PUT /api/keys/{keyId}/quota`)**:
-    1. 后端接收用户 ID, `keyId`, `limit`, `interval_minutes`。
-    2. **数据库交互**: 验证 Key 是否属于该用户。在 `api_key_quotas` 表中 `INSERT ... ON DUPLICATE KEY UPDATE limit = ?, interval_minutes = ?`。
-    3. **缓存**: 使对应的 Key 配额缓存失效。
-    4. **返回**: 返回 200 OK 或更新后的配额信息。
+### 集成点
 
-## 4. API 接口设计
+- **Core Routing API**: 认证中间件将保护 `/v1/messages` 等核心端点
+- **Database Schema**: 将扩展现有数据库模式以添加用户、API密钥和配额表
+- **UI Application**: React前端将与新的认证API端点集成
+- **Logging System**: 异步日志Worker将集成到认证流程中记录请求
 
-(详细的 OpenAPI/Swagger 规范将在阶段 3 定义，此处为高级设计)
+## 架构
 
-* **UI 认证**:
-  * `GET /auth/feishu`: 重定向到飞书。
-  * `GET /auth/feishu/callback`: 处理回调，设置 Session/JWT。
-  * `POST /auth/logout`: 清除 Session/JWT。
-* **API 密钥管理**:
-  * `GET /api/me`: 获取当前登录用户信息。
-  * `GET /api/keys`: 获取用户的所有 API Keys (元数据)。
-  * `POST /api/keys`: 创建新的 API Key (请求体可选 `{ "name": "..." }`)。
-  * `PUT /api/keys/{keyId}`: 更新 Key 信息 (请求体 `{ "name": "...", "is_active": true/false }`)。
-  * `DELETE /api/keys/{keyId}`: 删除 Key。
-  * `PUT /api/keys/{keyId}/quota`: 设置 Key 的配额 (请求体 `{ "limit": 100, "interval_minutes": 60 }`)。
-  * `DELETE /api/keys/{keyId}/quota`: 移除 Key 的配额。
-* **核心路由 (需 API Key 认证)**:
-  * `POST /v1/messages`: (现有接口，认证逻辑修改)。
-  * `GET /v1/models`: (可能需要，用于列出可用模型)。
-* **历史记录**:
-  * `GET /api/history`: 获取当前用户的请求日志 (支持分页、过滤)。
-* **管理员接口 (需 `is_admin` 权限)**:
-  * `GET /admin/users`: 获取用户列表。
-  * `PUT /admin/users/{userId}/quota`: 设置用户配额。
-  * `PUT /admin/users/{userId}/status`: 启用/禁用用户。
+设计采用模块化的认证架构，包含三个主要层次：
 
-## 5. 测试与验收策略
+1. **认证层**: 处理用户登录（飞书OAuth）和API密钥验证
+2. **授权层**: 管理用户角色和权限检查
+3. **业务逻辑层**: 处理配额管理、API密钥管理等核心功能
 
-* **单元测试**:
-  * API Key 生成、哈希、验证逻辑。
-  * 配额检查 SQL 查询或逻辑。
-  * Worker Thread 消息处理和数据库写入逻辑。
-* **集成测试**:
-  * 完整的飞书 OAuth 登录流程 (可能需要 Mock 飞书 API)。
-  * API Key 认证 `preHandler` 钩子，覆盖有效、无效、禁用、过期 Key 的情况。
-  * 配额检查 `preHandler` 钩子，覆盖未超限、刚好超限、已超限的情况。
-  * API Key 管理接口的 CRUD 操作及配额设置。
-  * 异步日志记录流程（主线程发送 -> Worker 接收 -> 数据库写入）。
-* **端到端测试 (UI)**:
-  * 用户通过飞书登录、登出。
-  * 用户创建、查看、禁用/启用、删除 API Key。
-  * 用户设置 API Key 配额。
-  * (待历史记录 UI 实现后) 用户查看请求历史。
-* **安全测试**:
-  * 检查 API Key 是否有泄露风险（日志、响应）。
-  * 测试配额限制是否能有效阻止超额请求。
-  * CSRF 防护（如果使用 Session）。
-  * 检查管理员接口是否有权限控制。
+### 模块化设计原则
+
+- **单一文件职责**: 认证、授权、配额管理分别位于独立模块
+- **组件隔离**: OAuth流程、API密钥验证、配额检查实现为独立组件
+- **服务层分离**: 数据访问（Prisma）、业务逻辑（Services）、API处理（Routes）清晰分离
+- **工具模块化**: 密钥生成、哈希、验证等工具函数独立模块化
+
+```mermaid
+graph TD
+    A[前端UI] --> B[认证API路由]
+    B --> C[认证服务层]
+    C --> D[飞书OAuth]
+    C --> E[API密钥管理]
+    C --> F[会话管理]
+
+    G[客户端请求] --> H[认证中间件]
+    H --> I[API密钥验证]
+    H --> J[配额检查]
+    I --> K[核心路由API]
+    J --> K
+
+    L[异步日志Worker] --> M[MySQL数据库]
+    C --> L
+    H --> L
+```
+
+## 组件和接口
+
+### 组件1: 飞书OAuth服务 (`src/auth/feishu.ts`)
+
+- **目的:** 处理飞书OAuth登录流程，包括授权请求、回调处理和用户信息同步
+- **接口:**
+  - `generateAuthUrl(): Promise<string>` - 生成飞书授权URL
+  - `handleCallback(code: string, state: string): Promise<User>` - 处理OAuth回调
+  - `syncUserInfo(feishuUserId: string): Promise<User>` - 同步用户信息
+- **依赖:** Fastify Session, HTTP Client (for Feishu API)
+- **重用:** 现有的配置系统获取飞书应用凭证
+
+### 组件2: API密钥服务 (`src/auth/apiKey.ts`)
+
+- **目的:** 管理API密钥的生成、哈希、验证和生命周期
+- **接口:**
+  - `generateApiKey(): Promise<string>` - 生成新的API密钥
+  - `hashApiKey(key: string): Promise<string>` - 哈希API密钥
+  - `validateApiKey(key: string): Promise<ApiKeyValidationResult>` - 验证API密钥
+  - `createApiKey(userId: string, name?: string): Promise<ApiKey>` - 创建新密钥
+- **依赖:** bcrypt, crypto module
+- **重用:** 现有的缓存系统进行密钥验证优化
+
+### 组件3: 配额服务 (`src/services/quotaService.ts`)
+
+- **目的:** 检查和管理用户及API密钥的请求配额
+- **接口:**
+  - `checkUserQuota(userId: string): Promise<QuotaResult>` - 检查用户配额
+  - `checkApiKeyQuota(apiKeyId: string): Promise<QuotaResult>` - 检查API密钥配额
+  - `recordQuotaCheck(result: QuotaResult): Promise<void>` - 记录配额检查结果
+- **依赖:** Prisma Client, Cache system
+- **重用:** 现有的数据库连接和缓存基础设施
+
+### 组件4: 认证中间件 (`src/middleware/auth.ts`)
+
+- **目的:** Fastify钩子，拦截请求并执行API密钥验证和配额检查
+- **接口:** Fastify preHandler hook implementation
+- **依赖:** API Key Service, Quota Service, Cache
+- **重用:** 现有的Fastify实例和路由注册机制
+
+## 数据模型
+
+### 用户模型
+
+```typescript
+interface User {
+  id: string              // UUID 主键
+  name: string           // 飞书用户显示名称
+  avatar_url?: string    // 头像URL
+  is_active: boolean     // 账户状态
+  is_admin: boolean      // 管理员权限
+  created_at: Date       // 账户创建时间戳
+  updated_at: Date       // 最后更新时间戳
+}
+```
+
+### 用户身份模型
+
+```typescript
+interface UserIdentity {
+  id: string             // UUID 主键
+  user_id: string        // users表外键
+  provider: string       // 认证提供方 ('feishu')
+  provider_user_id: string // 提供方用户标识符
+  created_at: Date       // 身份创建时间戳
+  updated_at: Date       // 最后更新时间戳
+}
+```
+
+### API密钥模型
+
+```typescript
+interface ApiKey {
+  id: string             // UUID 主键
+  user_id: string        // users表外键
+  name?: string          // 用户定义的密钥名称
+  key_hash: string       // API密钥的bcrypt哈希
+  key_prefix: string     // 用于缓存查找的前几位字符
+  is_active: boolean     // 密钥状态
+  last_used_at?: Date    // 最后成功使用时间戳
+  created_at: Date       // 密钥创建时间戳
+  updated_at: Date       // 最后更新时间戳
+}
+```
+
+### 用户配额模型
+
+```typescript
+interface UserQuota {
+  id: string             // UUID 主键
+  user_id: string        // users表外键
+  limit: number          // 每时间窗口最大请求数
+  interval_minutes: number // 时间窗口（分钟）
+  created_at: Date       // 配额创建时间戳
+  updated_at: Date       // 最后更新时间戳
+}
+```
+
+### API密钥配额模型
+
+```typescript
+interface ApiKeyQuota {
+  id: string             // UUID 主键
+  api_key_id: string     // api_keys表外键
+  limit: number          // 每时间窗口最大请求数
+  interval_minutes: number // 时间窗口（分钟）
+  created_at: Date       // 配额创建时间戳
+  updated_at: Date       // 最后更新时间戳
+}
+```
+
+### 请求日志模型
+
+```typescript
+interface RequestLog {
+  id: string             // UUID 主键
+  user_id: string        // users表外键
+  api_key_id?: string    // api_keys表外键（可选）
+  endpoint: string       // 访问的API端点
+  method: string         // HTTP方法
+  status: 'success' | 'error' | 'quota_exceeded' // 请求结果
+  response_time_ms: number // 请求处理时间
+  request_timestamp: Date // 请求时间戳
+  error_message?: string // 错误详情（如适用）
+}
+```
+
+## 错误处理
+
+### 错误场景
+
+1. **无效API密钥格式:**
+   - **处理:** 返回401 Unauthorized并提供通用错误消息
+   - **用户影响:** 客户端收到清晰的认证失败信息，不暴露系统细节
+
+2. **API密钥未找到或已禁用:**
+   - **处理:** 返回401 Unauthorized，可选择记录尝试用于安全监控
+   - **用户影响:** 用户必须提供有效的API密钥才能访问服务
+
+3. **配额超限:**
+   - **处理:** 返回429 Too Many Requests并包含Retry-After头
+   - **用户影响:** 客户端收到限流信息，可在指定时间后重试
+
+4. **飞书OAuth失败:**
+   - **处理:** 重定向到登录页面并附带错误参数，显示用户友好消息
+   - **用户影响:** 用户看到登录失败的清晰说明并可重试
+
+5. **数据库连接问题:**
+   - **处理:** 实施断路器模式，返回503 Service Unavailable
+   - **用户影响:** 用户收到临时服务不可用消息
+
+6. **会话篡改:**
+   - **处理:** 清除会话，重定向到登录，记录安全事件
+   - **用户影响:** 用户必须重新认证，系统保持安全
+
+## 测试策略
+
+### 单元测试
+
+- **API密钥生成和验证:** 测试密钥生成熵、哈希正确性和验证逻辑
+- **配额检查逻辑:** 测试配额计算、时间窗口处理和边缘情况
+- **OAuth服务函数:** 测试URL生成、令牌交换和用户信息解析
+- **哈希函数:** 测试bcrypt集成和恒定时间比较
+- **配置加载:** 测试认证配置解析和验证
+
+### 集成测试
+
+- **完整OAuth流程:** 模拟飞书API测试完整登录重定向和回调流程
+- **API密钥认证流程:** 测试中间件集成以及有效/无效密钥的处理
+- **配额强制执行:** 测试各种请求模式和限制下的配额检查
+- **数据库操作:** 测试用户/身份/API密钥的创建、更新和关系
+- **异步日志:** 测试主线程到工作线程的通信和数据库持久化
+
+### 端到端测试
+
+- **用户登录/登出:** 在浏览器环境中测试完整的飞书认证流程
+- **API密钥管理:** 通过UI测试密钥的创建、列表、启用/禁用和删除
+- **配额配置:** 通过管理界面测试设置和修改配额
+- **请求历史:** 测试请求日志的查看和过滤
+- **安全场景:** 测试CSRF保护、会话劫挟防护和权限提升
+
+## 原始文档的附加内容
+
+### 核心认证流程 (API密钥)
+
+1. **提取密钥**: 从请求头获取API密钥，如果缺失返回401
+2. **基本校验**: 检查密钥格式（如以`sk-`开头，长度符合要求）
+3. **提取前缀**: 获取密钥前缀用于缓存查询
+4. **缓存查询**: 根据前缀从内存缓存查找可能的密钥列表
+5. **数据库查询**: 缓存未命中时查询数据库获取密钥记录
+6. **哈希比较**: 使用bcrypt.compare进行恒定时间比较验证
+7. **用户信息查询**: 获取用户信息和状态检查
+8. **配额检查**: 检查用户级和API密钥级配额限制
+9. **附加信息**: 将用户信息附加到请求对象
+10. **更新使用时间**: 异步更新last_used_at字段
+11. **继续处理**: 调用done()继续请求处理
+
+### API接口设计
+
+**UI认证端点:**
+- `GET /auth/feishu`: 重定向到飞书授权页面
+- `GET /auth/feishu/callback`: 处理飞书OAuth回调
+- `POST /auth/logout`: 用户登出
+
+**API密钥管理端点:**
+- `GET /api/me`: 获取当前用户信息
+- `GET /api/keys`: 获取用户的API密钥列表
+- `POST /api/keys`: 创建新API密钥
+- `PUT /api/keys/{keyId}`: 更新密钥信息
+- `DELETE /api/keys/{keyId}`: 删除API密钥
+- `PUT /api/keys/{keyId}/quota`: 设置密钥配额
+- `DELETE /api/keys/{keyId}/quota`: 移除密钥配额
+
+**受保护的核心路由:**
+- `POST /v1/messages`: 需要API密钥认证的核心消息路由
+- `GET /v1/models`: 列出可用模型（如需要）
+
+**历史记录端点:**
+- `GET /api/history`: 获取用户请求历史（支持分页和过滤）
+
+**管理员端点:**
+- `GET /admin/users`: 获取用户列表
+- `PUT /admin/users/{userId}/quota`: 设置用户配额
+- `PUT /admin/users/{userId}/status`: 启用/禁用用户
