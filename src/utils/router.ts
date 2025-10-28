@@ -10,6 +10,7 @@ import { opendir, stat } from "fs/promises";
 import { join } from "path";
 import { CLAUDE_PROJECTS_DIR, HOME_DIR } from "../constants";
 import { LRUCache } from "lru-cache";
+import { selectRandomKey } from "./keySelector";
 
 const enc = get_encoding("cl100k_base");
 
@@ -103,6 +104,53 @@ const getProjectSpecificRouter = async (req: any) => {
   return undefined; // 返回undefined表示使用原始配置
 };
 
+/**
+ * Select a model randomly from a semicolon-separated list of model configurations
+ * @param modelString - The model configuration string, e.g., "provider1,model1;provider2,model2"
+ * @returns A randomly selected model configuration string, e.g., "provider1,model1"
+ */
+export const selectRandomModel = (modelString: string): string => {
+  if (!modelString) {
+    return modelString;  // Return the original string for empty value
+  }
+
+  if (!modelString.includes(';')) {
+    return modelString;  // 单模型，直接返回
+  }
+
+  const models = modelString.split(';').map(m => m.trim()).filter(Boolean);
+  if (models.length === 0) {
+    return modelString;  // 异常情况，返回原字符串
+  }
+
+  if (models.length === 1) {
+    // Return the original string if there is only one valid model (preserves semicolon)
+    return modelString.trim();
+  }
+
+  const randomIndex = Math.floor(Math.random() * models.length);
+  return models[randomIndex];
+};
+
+
+/**
+ * Parse a model string ("provider,model"), select a random key based on the provider config,
+ * and attach the selected key to req.selectedApiKey (without modifying req.body.model for backward compatibility)
+ */
+export const attachSelectedKeyToReq = (modelString: string, config: any, req: any) => {
+  if (!modelString || typeof modelString !== 'string') return;
+  const [provRaw] = modelString.split(',');
+  if (!provRaw) return;
+  const provName = provRaw.trim().toLowerCase();
+  const providerConfig = (config.Providers || []).find((p: any) => p.name && p.name.toLowerCase() === provName);
+  if (!providerConfig) return;
+  const key = selectRandomKey(providerConfig);
+  if (key) {
+    // Do not log the key in plaintext, attach it directly to the request object
+    req.selectedApiKey = key;
+  }
+};
+
 const getUseModel = async (
   req: any,
   tokenCount: number,
@@ -113,12 +161,14 @@ const getUseModel = async (
   const Router = projectSpecificRouter || config.Router;
 
   if (req.body.model.includes(",")) {
-    const [provider, model] = req.body.model.split(",");
+    const [providerRaw, modelRaw] = req.body.model.split(",");
+    const provider = providerRaw?.trim().toLowerCase();
+    const model = modelRaw?.trim().toLowerCase();
     const finalProvider = config.Providers.find(
-      (p: any) => p.name.toLowerCase() === provider
+      (p: any) => p.name && p.name.toLowerCase() === provider
     );
     const finalModel = finalProvider?.models?.find(
-      (m: any) => m.toLowerCase() === model
+      (m: any) => m && m.toLowerCase() === model
     );
     if (finalProvider && finalModel) {
       return `${finalProvider.name},${finalModel}`;
@@ -137,7 +187,7 @@ const getUseModel = async (
     req.log.info(
       `Using long context model due to token count: ${tokenCount}, threshold: ${longContextThreshold}`
     );
-    return Router.longContext;
+    return selectRandomModel(Router.longContext);
   }
   if (
     req.body?.system?.length > 1 &&
@@ -151,7 +201,7 @@ const getUseModel = async (
         `<CCR-SUBAGENT-MODEL>${model[1]}</CCR-SUBAGENT-MODEL>`,
         ""
       );
-      return model[1];
+      return selectRandomModel(model[1]);
     }
   }
   // Use the background model for any Claude Haiku variant
@@ -161,7 +211,7 @@ const getUseModel = async (
     config.Router.background
   ) {
     req.log.info(`Using background model for ${req.body.model}`);
-    return config.Router.background;
+    return selectRandomModel(config.Router.background);
   }
   // The priority of websearch must be higher than thinking.
   if (
@@ -169,18 +219,36 @@ const getUseModel = async (
     req.body.tools.some((tool: any) => tool.type?.startsWith("web_search")) &&
     Router.webSearch
   ) {
-    return Router.webSearch;
+    return selectRandomModel(Router.webSearch);
   }
   // if exits thinking, use the think model
   if (req.body.thinking && Router.think) {
     req.log.info(`Using think model for ${req.body.thinking}`);
-    return Router.think;
+    return selectRandomModel(Router.think);
   }
-  return Router!.default;
+  return selectRandomModel(Router!.default);
 };
 
 export const router = async (req: any, _res: any, context: any) => {
   const { config, event } = context;
+
+  // Handle null/undefined request body
+  if (!req.body) {
+    req.log?.error?.('Request body is null or undefined');
+    req.body = {};
+    // Set default model from config if available
+    if (config.Router?.default) {
+      req.body.model = config.Router.default;
+    }
+    return;
+  }
+
+  // Handle null/undefined config
+  if (!config) {
+    req.log?.error?.('Config is null or undefined');
+    return;
+  }
+
   // Parse sessionId from metadata.user_id
   if (req.body.metadata?.user_id) {
     const parts = req.body.metadata.user_id.split("_session_");
@@ -193,10 +261,14 @@ export const router = async (req: any, _res: any, context: any) => {
   if (
     config.REWRITE_SYSTEM_PROMPT &&
     system.length > 1 &&
-    system[1]?.text?.includes("<env>")
+    typeof system[1] === 'object' &&
+    system[1] !== null &&
+    'text' in system[1] &&
+    typeof (system[1] as any).text === 'string' &&
+    (system[1] as any).text.includes("<env>")
   ) {
     const prompt = await readFile(config.REWRITE_SYSTEM_PROMPT, "utf-8");
-    system[1].text = `${prompt}<env>${system[1].text.split("<env>").pop()}`;
+    (system[1] as any).text = `${prompt}<env>${(system[1] as any).text.split("<env>").pop()}`;
   }
 
   try {
@@ -222,9 +294,17 @@ export const router = async (req: any, _res: any, context: any) => {
       model = await getUseModel(req, tokenCount, config, lastMessageUsage);
     }
     req.body.model = model;
+
+    // 尝试为确定的 model 随机选择 provider key 并挂载到 req.selectedApiKey（不修改 req.body.model）
+    try {
+      attachSelectedKeyToReq(model, config, req);
+    } catch (e: any) {
+      // 不让 key 选择失败阻塞主要路由流程，只记录日志
+      req.log?.warn?.(`attachSelectedKeyToReq failed: ${e?.message || e}`);
+    }
   } catch (error: any) {
     req.log.error(`Error in router middleware: ${error.message}`);
-    req.body.model = config.Router!.default;
+    req.body.model = selectRandomModel(config.Router!.default);
   }
   return;
 };
@@ -234,6 +314,9 @@ export const router = async (req: any, _res: any, context: any) => {
 // 使用LRU缓存，限制最大1000个条目
 const sessionProjectCache = new LRUCache<string, string | null>({
   max: 1000,
+  ttl: 1000 * 60 * 10, // 10分钟
+  allowStale: false,
+  updateAgeOnGet: true,
 });
 
 export const searchProjectBySession = async (
@@ -260,7 +343,7 @@ export const searchProjectBySession = async (
       const sessionFilePath = join(
         CLAUDE_PROJECTS_DIR,
         folderName,
-        `${sessionId}.jsonl`
+        `${sessionId || 'unknown'}.jsonl`
       );
       try {
         const fileStat = await stat(sessionFilePath);

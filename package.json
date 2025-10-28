@@ -7,7 +7,12 @@
   },
   "scripts": {
     "build": "node scripts/build.js",
-    "release": "npm run build && npm publish"
+    "release": "npm run build && npm publish",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "test:ui": "vitest --ui",
+    "validate": "node -e \"const { validateConfig, formatValidationResult } = require('./src/utils/configValidator'); const config = require('./config.json'); console.log(formatValidationResult(validateConfig(config)));\"",
+    "perf:report": "node -e \"console.log(require('./src/utils/performanceMonitor').performanceMonitor.generateReport())\""
   },
   "keywords": [
     "claude",
@@ -35,10 +40,12 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.15",
+    "@vitest/coverage-v8": "^4.0.4",
     "esbuild": "^0.25.1",
     "fastify": "^5.4.0",
     "shx": "^0.4.0",
-    "typescript": "^5.8.2"
+    "typescript": "^5.8.2",
+    "vitest": "^4.0.4"
   },
   "publishConfig": {
     "ignore": [
