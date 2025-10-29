@@ -88,11 +88,13 @@ graph TD
 ## 数据模型
 
 ### `user_quotas`
+
 - `user_id` (关联 `users`)
 - `limit` (INTEGER)
 - `interval_minutes` (INTEGER)
 
 ### `api_key_quotas`
+
 - `api_key_id` (关联 `api_keys`)
 - `limit` (INTEGER)
 - `interval_minutes` (INTEGER)
@@ -131,11 +133,13 @@ graph TD
 ### API 设计
 
 #### 用户配额 (管理员权限)
+
 - **`PUT /admin/users/{userId}/quota`**: 设置或更新用户的配额规则。 `{ "limit": number, "interval_minutes": number }`
 - **`DELETE /admin/users/{userId}/quota`**: 移除用户的配额规则。
 - **`GET /admin/users/{userId}/quota`**: 获取用户的配额规则。
 
 #### API 密钥配额 (用户权限)
+
 - **`PUT /api/keys/{keyId}/quota`**: 设置或更新指定 API Key 的配额规则。`{ "limit": number, "interval_minutes": number }`
 - **`DELETE /api/keys/{keyId}/quota`**: 移除指定 API Key 的配额规则。
 - **`GET /api/keys/{keyId}/quota`**: 获取指定 API Key 的配额规则。
