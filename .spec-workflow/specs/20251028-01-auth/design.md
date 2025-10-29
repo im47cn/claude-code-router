@@ -9,6 +9,7 @@
 ### 技术标准 (tech.md)
 
 本设计严格遵循 tech.md 中定义的技术栈选择：
+
 - **数据库**: 使用 MySQL 进行用户、API密钥和配额数据的持久化存储
 - **ORM/Query Builder**: 采用 Prisma 提供类型安全的数据库交互
 - **后端框架**: 基于 Fastify 构建高性能的认证和API服务
@@ -20,6 +21,7 @@
 ### 项目结构 (structure.md)
 
 实现遵循 structure.md 中定义的目录结构：
+
 - **`src/auth/`**: 包含飞书OAuth、API密钥生成和验证逻辑
 - **`src/middleware/`**: 实现认证和配额检查的Fastify钩子
 - **`src/services/`**: 封装配额检查、API密钥管理等业务逻辑
@@ -275,11 +277,13 @@ interface RequestLog {
 ### API接口设计
 
 **UI认证端点:**
+
 - `GET /auth/feishu`: 重定向到飞书授权页面
 - `GET /auth/feishu/callback`: 处理飞书OAuth回调
 - `POST /auth/logout`: 用户登出
 
 **API密钥管理端点:**
+
 - `GET /api/me`: 获取当前用户信息
 - `GET /api/keys`: 获取用户的API密钥列表
 - `POST /api/keys`: 创建新API密钥
@@ -289,13 +293,16 @@ interface RequestLog {
 - `DELETE /api/keys/{keyId}/quota`: 移除密钥配额
 
 **受保护的核心路由:**
+
 - `POST /v1/messages`: 需要API密钥认证的核心消息路由
 - `GET /v1/models`: 列出可用模型（如需要）
 
 **历史记录端点:**
+
 - `GET /api/history`: 获取用户请求历史（支持分页和过滤）
 
 **管理员端点:**
+
 - `GET /admin/users`: 获取用户列表
 - `PUT /admin/users/{userId}/quota`: 设置用户配额
 - `PUT /admin/users/{userId}/status`: 启用/禁用用户
