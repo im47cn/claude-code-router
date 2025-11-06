@@ -15,3 +15,14 @@ tsconfig.tsbuildinfo
 
 # Test coverage reports
 coverage/
+
+logs/
+
+playwright-report/
+
+test-results/
+tests/logs/
+
+.claude/data/sessions/
+.claude/settings/kfc-settings.json
+.claude/agents/kfc/

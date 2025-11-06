@@ -1,57 +1,104 @@
-import Server from "@musistudio/llms";
+import fastify, { FastifyInstance } from "fastify";
+import fastifyCookie from "@fastify/cookie";
 import { readConfigFile, writeConfigFile, backupConfigFile } from "./utils";
-import { checkForUpdates, performUpdate } from "./utils";
+import { checkForUpdates, performUpdate } from "./utils/update";
 import { join } from "path";
 import fastifyStatic from "@fastify/static";
-import { readdirSync, statSync, readFileSync, writeFileSync, existsSync } from "fs";
+import {
+  readdirSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from "fs";
 import { homedir } from "os";
-import {calculateTokenCount} from "./utils/router";
+import { calculateTokenCount } from "./utils/router";
+import { RuleEngine } from "./utils/ruleEngine";
+import {
+  apiKeyAuth,
+  quotaCheck,
+  userSessionAuth,
+  requireAdmin,
+} from "./middleware/auth";
+import { authRoutes } from "./api/auth";
+import { apiKeyRoutes } from "./api/keys";
+import { testDatabaseConnection, disconnectDatabase } from "./db/client";
+import { ConfigManager } from "./utils/config";
 
-export const createServer = (config: any): Server => {
-  const server = new Server(config);
+declare module "fastify" {
+  interface FastifyInstance {
+    apiKeyAuth: any;
+    quotaCheck: any;
+    userSessionAuth: any;
+    requireAdmin: any;
+    ruleEngine: RuleEngine;
+  }
+}
 
-  server.app.post("/v1/messages/count_tokens", async (req, reply) => {
-    const {messages, tools, system} = req.body;
-    const tokenCount = calculateTokenCount(messages, system, tools);
-    return { "input_tokens": tokenCount }
+export const createServer = (
+  configPath: string,
+  loggerConfig: any,
+): FastifyInstance => {
+  const configManager = new ConfigManager(configPath);
+  const config = configManager.getConfig();
+
+  if (!process.env.JWT_SECRET) {
+    throw new Error("JWT_SECRET must be set in the environment variables.");
+  }
+
+  if (!process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL must be set in the environment variables.");
+  }
+
+  const app = fastify({ logger: loggerConfig });
+  app.register(fastifyCookie);
+  const ruleEngine = new RuleEngine(config);
+
+  app.decorate("ruleEngine", ruleEngine);
+  app.decorate("apiKeyAuth", apiKeyAuth(config));
+  app.decorate("quotaCheck", quotaCheck);
+  app.decorate("userSessionAuth", userSessionAuth);
+  app.decorate("requireAdmin", requireAdmin);
+
+  testDatabaseConnection();
+
+  authRoutes(app);
+  apiKeyRoutes(app);
+
+  app.addHook("preHandler", app.apiKeyAuth);
+  app.addHook("preHandler", app.quotaCheck);
+
+  app.addHook("onClose", async (instance) => {
+    await disconnectDatabase();
   });
 
-  // Add endpoint to read config.json with access control
-  server.app.get("/api/config", async (req, reply) => {
+  app.post("/v1/messages/count_tokens", async (req, reply) => {
+    const { messages, tools, system } = req.body as any;
+    const tokenCount = calculateTokenCount(messages, system, tools);
+    return { input_tokens: tokenCount };
+  });
+
+  app.get("/api/config", async (req, reply) => {
     return await readConfigFile();
   });
 
-  server.app.get("/api/transformers", async () => {
-    const transformers =
-      server.app._server!.transformerService.getAllTransformers();
-    const transformerList = Array.from(transformers.entries()).map(
-      ([name, transformer]: any) => ({
-        name,
-        endpoint: transformer.endPoint || null,
-      })
-    );
-    return { transformers: transformerList };
+  app.get("/api/transformers", async () => {
+    // This needs to be reimplemented, as server.app._server is not available with this new structure.
+    return { transformers: [] };
   });
 
-  // Add endpoint to save config.json with access control
-  server.app.post("/api/config", async (req, reply) => {
+  app.post("/api/config", async (req, reply) => {
     const newConfig = req.body;
-
-    // Backup existing config file if it exists
     const backupPath = await backupConfigFile();
     if (backupPath) {
       console.log(`Backed up existing configuration file to ${backupPath}`);
     }
-
     await writeConfigFile(newConfig);
     return { success: true, message: "Config saved successfully" };
   });
 
-  // Add endpoint to restart the service with access control
-  server.app.post("/api/restart", async (req, reply) => {
+  app.post("/api/restart", async (req, reply) => {
     reply.send({ success: true, message: "Service restart initiated" });
-
-    // Restart the service after a short delay to allow response to be sent
     setTimeout(() => {
       const { spawn } = require("child_process");
       spawn(process.execPath, [process.argv[1], "restart"], {
@@ -61,29 +108,25 @@ export const createServer = (config: any): Server => {
     }, 1000);
   });
 
-  // Register static file serving with caching
-  server.app.register(fastifyStatic, {
+  app.register(fastifyStatic, {
     root: join(__dirname, "..", "dist"),
     prefix: "/ui/",
     maxAge: "1h",
   });
 
-  // Redirect /ui to /ui/ for proper static file serving
-  server.app.get("/ui", async (_, reply) => {
+  app.get("/ui", async (_, reply) => {
     return reply.redirect("/ui/");
   });
 
-  // 版本检查端点
-  server.app.get("/api/update/check", async (req, reply) => {
+  app.get("/api/update/check", async (req, reply) => {
     try {
-      // 获取当前版本
       const currentVersion = require("../package.json").version;
-      const { hasUpdate, latestVersion, changelog } = await checkForUpdates(currentVersion);
-
+      const { hasUpdate, latestVersion, changelog } =
+        await checkForUpdates(currentVersion);
       return {
         hasUpdate,
         latestVersion: hasUpdate ? latestVersion : undefined,
-        changelog: hasUpdate ? changelog : undefined
+        changelog: hasUpdate ? changelog : undefined,
       };
     } catch (error) {
       console.error("Failed to check for updates:", error);
@@ -91,19 +134,14 @@ export const createServer = (config: any): Server => {
     }
   });
 
-  // 执行更新端点
-  server.app.post("/api/update/perform", async (req, reply) => {
+  app.post("/api/update/perform", async (req, reply) => {
     try {
-      // 只允许完全访问权限的用户执行更新
       const accessLevel = (req as any).accessLevel || "restricted";
       if (accessLevel !== "full") {
         reply.status(403).send("Full access required to perform updates");
         return;
       }
-
-      // 执行更新逻辑
       const result = await performUpdate();
-
       return result;
     } catch (error) {
       console.error("Failed to perform update:", error);
@@ -111,33 +149,35 @@ export const createServer = (config: any): Server => {
     }
   });
 
-  // 获取日志文件列表端点
-  server.app.get("/api/logs/files", async (req, reply) => {
+  app.get("/api/logs/files", async (req, reply) => {
     try {
       const logDir = join(homedir(), ".claude-code-router", "logs");
-      const logFiles: Array<{ name: string; path: string; size: number; lastModified: string }> = [];
-
+      const logFiles: Array<{
+        name: string;
+        path: string;
+        size: number;
+        lastModified: string;
+      }> = [];
       if (existsSync(logDir)) {
         const files = readdirSync(logDir);
-
         for (const file of files) {
-          if (file.endsWith('.log')) {
+          if (file.endsWith(".log")) {
             const filePath = join(logDir, file);
             const stats = statSync(filePath);
-
             logFiles.push({
               name: file,
               path: filePath,
               size: stats.size,
-              lastModified: stats.mtime.toISOString()
+              lastModified: stats.mtime.toISOString(),
             });
           }
         }
-
-        // 按修改时间倒序排列
-        logFiles.sort((a, b) => new Date(b.lastModified).getTime() - new Date(a.lastModified).getTime());
+        logFiles.sort(
+          (a, b) =>
+            new Date(b.lastModified).getTime() -
+            new Date(a.lastModified).getTime(),
+        );
       }
-
       return logFiles;
     } catch (error) {
       console.error("Failed to get log files:", error);
@@ -145,27 +185,20 @@ export const createServer = (config: any): Server => {
     }
   });
 
-  // 获取日志内容端点
-  server.app.get("/api/logs", async (req, reply) => {
+  app.get("/api/logs", async (req, reply) => {
     try {
       const filePath = (req.query as any).file as string;
       let logFilePath: string;
-
       if (filePath) {
-        // 如果指定了文件路径，使用指定的路径
         logFilePath = filePath;
       } else {
-        // 如果没有指定文件路径，使用默认的日志文件路径
         logFilePath = join(homedir(), ".claude-code-router", "logs", "app.log");
       }
-
       if (!existsSync(logFilePath)) {
         return [];
       }
-
-      const logContent = readFileSync(logFilePath, 'utf8');
-      const logLines = logContent.split('\n').filter(line => line.trim())
-
+      const logContent = readFileSync(logFilePath, "utf8");
+      const logLines = logContent.split("\n").filter((line) => line.trim());
       return logLines;
     } catch (error) {
       console.error("Failed to get logs:", error);
@@ -173,24 +206,18 @@ export const createServer = (config: any): Server => {
     }
   });
 
-  // 清除日志内容端点
-  server.app.delete("/api/logs", async (req, reply) => {
+  app.delete("/api/logs", async (req, reply) => {
     try {
       const filePath = (req.query as any).file as string;
       let logFilePath: string;
-
       if (filePath) {
-        // 如果指定了文件路径，使用指定的路径
         logFilePath = filePath;
       } else {
-        // 如果没有指定文件路径，使用默认的日志文件路径
         logFilePath = join(homedir(), ".claude-code-router", "logs", "app.log");
       }
-
       if (existsSync(logFilePath)) {
-        writeFileSync(logFilePath, '', 'utf8');
+        writeFileSync(logFilePath, "", "utf8");
       }
-
       return { success: true, message: "Logs cleared successfully" };
     } catch (error) {
       console.error("Failed to clear logs:", error);
@@ -198,5 +225,5 @@ export const createServer = (config: any): Server => {
     }
   });
 
-  return server;
+  return app;
 };

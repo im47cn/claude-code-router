@@ -1,0 +1,621 @@
+/**
+ * API密钥生成和验证服务
+ *
+ * 提供API密钥的安全生成、哈希存储、验证和管理功能。
+ * 使用bcrypt进行安全的密码哈希，使用恒定时间比较防止时序攻击。
+ */
+
+import bcrypt from 'bcrypt';
+import crypto from 'crypto';
+import { db } from '../db/client';
+import { logger } from '../utils/logger';
+import {
+  ApiKey,
+  CreateApiKeyRequest,
+  CreateApiKeyResponse,
+  UpdateApiKeyRequest,
+  AuthResult,
+  AuthErrorCode,
+  QuotaCheckResult
+} from '../types/auth';
+
+/**
+ * API密钥服务类
+ */
+export class ApiKeyService {
+  private readonly bcryptRounds: number;
+  private readonly keyPrefix = 'sk-';
+  private readonly keyLength = 48; // 不包含前缀的总长度
+
+  constructor() {
+    // 从环境变量读取bcrypt轮数，默认为12
+    this.bcryptRounds = parseInt(process.env.BCRYPT_ROUNDS || '12', 10);
+
+    if (this.bcryptRounds < 10 || this.bcryptRounds > 15) {
+      logger.warn('BCRYPT_ROUNDS 应该在10-15之间，使用默认值12');
+      this.bcryptRounds = 12;
+    }
+  }
+
+  /**
+   * 生成新的API密钥
+   * @param userId 用户ID
+   * @param request 创建请求参数
+   * @returns 包含完整密钥的响应（只返回一次）
+   */
+  async createApiKey(userId: string, request: CreateApiKeyRequest): Promise<CreateApiKeyResponse> {
+    try {
+      // 1. 生成API密钥
+      const fullKey = this.generateApiKey();
+      const keyPrefix = this.extractPrefix(fullKey);
+
+      // 2. 哈希密钥
+      const keyHash = await this.hashApiKey(fullKey);
+
+      // 3. 创建数据库记录
+      const apiKey = await db.apiKey.create({
+        data: {
+          userId,
+          name: request.name,
+          keyHash,
+          keyPrefix,
+          isActive: true,
+        },
+        include: {
+          apiKeyQuota: true,
+        },
+      });
+
+      // 4. 创建配额记录（如果提供了配额参数）
+      let quota;
+      if (request.requestLimit && request.timeWindow) {
+        quota = await db.apiKeyQuota.create({
+          data: {
+            apiKeyId: apiKey.id,
+            requestLimit: request.requestLimit,
+            timeWindow: request.timeWindow,
+            currentCount: 0,
+            windowStartAt: new Date(),
+            isActive: true,
+          },
+        });
+      }
+
+      logger.info('API密钥创建成功', {
+        apiKeyId: apiKey.id,
+        userId,
+        name: request.name,
+        keyPrefix,
+      });
+
+      return {
+        apiKey,
+        quota,
+        fullKey, // 只在创建时返回完整密钥
+      };
+    } catch (error) {
+      logger.error('API密钥创建失败', { error, userId, request });
+      throw new Error('API密钥创建失败');
+    }
+  }
+
+  /**
+   * 验证API密钥
+   * @param apiKey 完整的API密钥
+   * @returns 认证结果
+   */
+  async validateApiKey(apiKey: string): Promise<AuthResult> {
+    try {
+      // 1. 检查密钥格式
+      if (!this.isValidApiKeyFormat(apiKey)) {
+        return {
+          success: false,
+          error: 'API密钥格式无效',
+          errorCode: AuthErrorCode.INVALID_API_KEY,
+        };
+      }
+
+      // 2. 提取前缀并查找对应的密钥记录
+      const keyPrefix = this.extractPrefix(apiKey);
+      const potentialKeys = await db.apiKey.findMany({
+        where: {
+          keyPrefix,
+          isActive: true,
+        },
+        include: {
+          user: {
+            include: {
+              userQuotas: true,
+            },
+          },
+          apiKeyQuota: true,
+        },
+      });
+
+      if (potentialKeys.length === 0) {
+        return {
+          success: false,
+          error: 'API密钥不存在或已禁用',
+          errorCode: AuthErrorCode.INACTIVE_API_KEY,
+        };
+      }
+
+      // 3. 逐个验证哈希（使用恒定时间比较）
+      let validKey: ApiKey | null = null; // 类型修正
+      for (const keyRecord of potentialKeys) {
+        if (await this.compareApiKey(apiKey, keyRecord.keyHash)) {
+          validKey = keyRecord as any;
+          // Don't break here to ensure constant time
+        }
+      }
+
+      if (validKey) {
+        // Now that we have a valid key, perform user checks and update
+        if (!validKey.user.isActive) {
+          return {
+            success: false,
+            error: '用户账户已禁用',
+            errorCode: AuthErrorCode.INACTIVE_USER,
+          };
+        }
+
+        await this.updateLastUsedAt(validKey.id);
+
+        logger.debug('API密钥验证成功', {
+          apiKeyId: validKey.id,
+          userId: validKey.userId,
+          keyPrefix,
+        });
+
+        return {
+          success: true,
+          user: {
+            id: validKey.user.id,
+            name: validKey.user.name,
+            avatarUrl: validKey.user.avatarUrl || undefined,
+            isAdmin: validKey.user.isAdmin,
+            isActive: validKey.user.isActive,
+          },
+          apiKey: {
+            id: validKey.id,
+            userId: validKey.userId,
+            name: validKey.name,
+            keyHash: validKey.keyHash,
+            keyPrefix: validKey.keyPrefix,
+            isActive: validKey.isActive,
+            lastUsedAt: validKey.lastUsedAt || undefined,
+            createdAt: validKey.createdAt,
+            updatedAt: validKey.updatedAt,
+          },
+        };
+      }
+
+
+      return {
+        success: false,
+        error: 'API密钥无效',
+        errorCode: AuthErrorCode.INVALID_API_KEY,
+      };
+    } catch (error) {
+      logger.error('API密钥验证异常', { error });
+      return {
+        success: false,
+        error: '认证服务异常',
+        errorCode: AuthErrorCode.INTERNAL_ERROR,
+      };
+    }
+  }
+
+  /**
+   * 检查API密钥配额
+   * @param apiKeyId API密钥ID
+   * @returns 配额检查结果
+   */
+  async checkApiKeyQuota(apiKeyId: string): Promise<QuotaCheckResult> {
+    const startTime = Date.now();
+    
+    logger.debug("开始API密钥配额检查", {
+      apiKeyId,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      // 使用数据库事务确保读取-更新-写入的原子性
+      const result = await db.$transaction(async (tx) => {
+        // 获取配额记录（事务内自动锁定）
+        const quota = await tx.apiKeyQuota.findUnique({
+          where: { apiKeyId },
+        });
+
+        // 检查配额是否存在或已禁用
+        if (!quota || !quota.isActive) {
+          logger.info("API密钥无配额限制", {
+            apiKeyId,
+            quotaExists: !!quota,
+            quotaActive: quota?.isActive,
+          });
+          
+          return {
+            allowed: true,
+            remainingRequests: -1, // -1 表示无限制
+            windowStartAt: new Date(),
+            windowEndAt: new Date(),
+            resetIn: 0,
+          };
+        }
+
+        const now = new Date();
+        const windowEndAt = new Date(quota.windowStartAt.getTime() + quota.timeWindow * 1000);
+
+        // 检查时间窗口是否已过期，如果过期则重置
+        if (now > windowEndAt) {
+          logger.info("时间窗口已过期，重置配额计数器", {
+            apiKeyId,
+            quotaId: quota.id,
+            previousCount: quota.currentCount,
+            oldWindowStart: quota.windowStartAt.toISOString(),
+            newWindowStart: now.toISOString(),
+          });
+
+          // 重置计数器并开始新的时间窗口
+          await tx.apiKeyQuota.update({
+            where: { id: quota.id },
+            data: {
+              currentCount: 1, // 当前请求计为第1个
+              windowStartAt: now,
+            },
+          });
+
+          const newWindowEndAt = new Date(now.getTime() + quota.timeWindow * 1000);
+
+          return {
+            allowed: true,
+            remainingRequests: quota.requestLimit - 1,
+            windowStartAt: now,
+            windowEndAt: newWindowEndAt,
+            resetIn: quota.timeWindow,
+          };
+        }
+
+        // 检查是否超过配额限制
+        if (quota.currentCount >= quota.requestLimit) {
+          const resetIn = Math.ceil((windowEndAt.getTime() - now.getTime()) / 1000);
+          
+          logger.warn("API密钥配额已耗尽", {
+            apiKeyId,
+            quotaId: quota.id,
+            currentCount: quota.currentCount,
+            requestLimit: quota.requestLimit,
+            windowStartAt: quota.windowStartAt.toISOString(),
+            windowEndAt: windowEndAt.toISOString(),
+            resetIn,
+          });
+
+          return {
+            allowed: false,
+            remainingRequests: 0,
+            windowStartAt: quota.windowStartAt,
+            windowEndAt,
+            resetIn,
+          };
+        }
+
+        // 增加计数器（原子操作）
+        await tx.apiKeyQuota.update({
+          where: { id: quota.id },
+          data: {
+            currentCount: quota.currentCount + 1,
+          },
+        });
+
+        logger.debug("配额计数器已更新", {
+          apiKeyId,
+          quotaId: quota.id,
+          previousCount: quota.currentCount,
+          newCount: quota.currentCount + 1,
+          remainingRequests: quota.requestLimit - quota.currentCount - 1,
+        });
+
+        return {
+          allowed: true,
+          remainingRequests: quota.requestLimit - quota.currentCount - 1,
+          windowStartAt: quota.windowStartAt,
+          windowEndAt,
+          resetIn: Math.ceil((windowEndAt.getTime() - now.getTime()) / 1000),
+        };
+      }, {
+        // 设置事务超时时间，防止长时间锁定
+        timeout: 5000, // 5秒超时
+      });
+
+      const duration = Date.now() - startTime;
+      
+      logger.info("API密钥配额检查完成", {
+        apiKeyId,
+        allowed: result.allowed,
+        remainingRequests: result.remainingRequests,
+        windowStartAt: result.windowStartAt.toISOString(),
+        windowEndAt: result.windowEndAt.toISOString(),
+        resetIn: result.resetIn,
+        duration: `${duration}ms`,
+      });
+
+      return result;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      
+      logger.error("API密钥配额检查异常", {
+        apiKeyId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        duration: `${duration}ms`,
+      });
+
+      // 修改错误处理策略：出错时拒绝通过（更安全）
+      logger.error("配额检查失败，拒绝请求以保护系统", {
+        apiKeyId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+
+      return {
+        allowed: false,
+        remainingRequests: 0,
+        windowStartAt: new Date(),
+        windowEndAt: new Date(),
+        resetIn: 0,
+      };
+    }
+  }
+  /**
+   * 获取用户的API密钥列表
+   * @param userId 用户ID
+   * @returns API密钥列表
+   */
+  async getUserApiKeys(userId: string): Promise<ApiKey[]> {
+    try {
+      const apiKeys = await db.apiKey.findMany({
+        where: { userId },
+        include: {
+          apiKeyQuota: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+
+      return apiKeys.map(key => ({
+        id: key.id,
+        userId: key.userId,
+        name: key.name,
+        keyHash: key.keyHash,
+        keyPrefix: key.keyPrefix,
+        isActive: key.isActive,
+        lastUsedAt: key.lastUsedAt || undefined,
+        createdAt: key.createdAt,
+        updatedAt: key.updatedAt,
+      }));
+    } catch (error) {
+      logger.error('获取用户API密钥列表失败', { error, userId });
+      throw new Error('获取API密钥列表失败');
+    }
+  }
+
+  /**
+   * 更新API密钥
+   * @param apiKeyId API密钥ID
+   * @param userId 用户ID（用于权限验证）
+   * @param request 更新请求
+   * @returns 更新后的API密钥
+   */
+  async updateApiKey(apiKeyId: string, userId: string, request: UpdateApiKeyRequest): Promise<ApiKey> {
+    try {
+      // 验证权限
+      const existingKey = await db.apiKey.findFirst({
+        where: { id: apiKeyId, userId },
+      });
+
+      if (!existingKey) {
+        throw new Error('API密钥不存在或无权限');
+      }
+
+      const updateData: any = {};
+
+      if (request.name !== undefined) {
+        updateData.name = request.name;
+      }
+
+      if (request.isActive !== undefined) {
+        updateData.isActive = request.isActive;
+      }
+
+      updateData.updatedAt = new Date();
+
+      const updatedKey = await db.apiKey.update({
+        where: { id: apiKeyId },
+        data: updateData,
+      });
+
+      // 更新配额（如果提供）
+      if (request.requestLimit && request.timeWindow) {
+        await db.apiKeyQuota.upsert({
+          where: { apiKeyId },
+          update: {
+            requestLimit: request.requestLimit,
+            timeWindow: request.timeWindow,
+            isActive: request.isActive ?? true,
+          },
+          create: {
+            apiKeyId,
+            requestLimit: request.requestLimit,
+            timeWindow: request.timeWindow,
+            currentCount: 0,
+            windowStartAt: new Date(),
+            isActive: request.isActive ?? true,
+          },
+        });
+      }
+
+      logger.info('API密钥更新成功', {
+        apiKeyId,
+        userId,
+        changes: request,
+      });
+
+      return {
+        id: updatedKey.id,
+        userId: updatedKey.userId,
+        name: updatedKey.name,
+        keyHash: updatedKey.keyHash,
+        keyPrefix: updatedKey.keyPrefix,
+        isActive: updatedKey.isActive,
+        lastUsedAt: updatedKey.lastUsedAt || undefined,
+        createdAt: updatedKey.createdAt,
+        updatedAt: updatedKey.updatedAt,
+      };
+    } catch (error) {
+      logger.error('API密钥更新失败', { error, apiKeyId, userId, request });
+      throw new Error('API密钥更新失败');
+    }
+  }
+
+  /**
+   * 删除API密钥
+   * @param apiKeyId API密钥ID
+   * @param userId 用户ID（用于权限验证）
+   */
+  async deleteApiKey(apiKeyId: string, userId: string): Promise<void> {
+    try {
+      // 验证权限并删除
+      const deletedKey = await db.apiKey.deleteMany({
+        where: { id: apiKeyId, userId },
+      });
+
+      if (deletedKey.count === 0) {
+        throw new Error('API密钥不存在或无权限');
+      }
+
+      logger.info('API密钥删除成功', {
+        apiKeyId,
+        userId,
+      });
+    } catch (error) {
+      logger.error('API密钥删除失败', { error, apiKeyId, userId });
+      throw new Error('API密钥删除失败');
+    }
+  }
+
+  // ============================================================================
+  // 私有辅助方法
+  // ============================================================================
+
+  /**
+   * 生成随机API密钥
+   * @returns 完整的API密钥字符串
+   */
+  private generateApiKey(): string {
+    const randomPart = crypto.randomBytes(this.keyLength)
+      .toString('base64')
+      .replace(/[+/=]/g, '') // 移除特殊字符
+      .substring(0, this.keyLength);
+
+    return `${this.keyPrefix}${randomPart}`;
+  }
+
+  /**
+   * 哈希API密钥
+   * @param apiKey 完整的API密钥
+   * @returns 哈希后的密钥
+   */
+  private async hashApiKey(apiKey: string): Promise<string> {
+    return bcrypt.hash(apiKey, this.bcryptRounds);
+  }
+
+  /**
+   * 恒定时间比较API密钥
+   * @param apiKey 原始密钥
+   * @param hash 哈希值
+   * @returns 是否匹配
+   */
+  private async compareApiKey(apiKey: string, hash: string): Promise<boolean> {
+    return bcrypt.compare(apiKey, hash);
+  }
+
+  /**
+   * 提取API密钥前缀
+   * @param apiKey 完整的API密钥
+   * @returns 密钥前缀（sk-xxxxxxxx）
+   */
+  private extractPrefix(apiKey: string): string {
+    return apiKey.substring(0, 10); // sk- + 8个字符
+  }
+
+  /**
+   * 验证API密钥格式
+   * @param apiKey API密钥
+   * @returns 是否有效
+   */
+  private isValidApiKeyFormat(apiKey: string): boolean {
+    return /^sk-[a-zA-Z0-9]{48}$/.test(apiKey);
+  }
+
+  /**
+   * 更新API密钥最后使用时间
+   * @param apiKeyId API密钥ID
+   */
+  private async updateLastUsedAt(apiKeyId: string): Promise<void> {
+    try {
+      await db.apiKey.update({
+        where: { id: apiKeyId },
+        data: { lastUsedAt: new Date() },
+      });
+    } catch (error) {
+      // 这个操作失败不影响主要功能，只记录警告
+      logger.warn('更新API密钥最后使用时间失败', { error, apiKeyId });
+    }
+  }
+
+  /**
+   * 切换API密钥状态
+   */
+  async toggleApiKeyStatus(apiKeyId: string, userId: string): Promise<boolean> {
+    try {
+      // 查找API密钥并验证权限
+      const apiKey = await db.apiKey.findFirst({
+        where: {
+          id: apiKeyId,
+          userId,
+        },
+      });
+
+      if (!apiKey) {
+        throw new Error("API密钥不存在或无权限");
+      }
+
+      const newStatus = !apiKey.isActive;
+
+      // 更新API密钥状态
+      await db.apiKey.update({
+        where: { id: apiKeyId },
+        data: {
+          isActive: newStatus,
+          updatedAt: new Date(),
+        },
+      });
+
+      logger.info("API密钥状态切换成功", {
+        apiKeyId,
+        userId,
+        newStatus,
+      });
+
+      return newStatus;
+    } catch (error) {
+      logger.error("切换API密钥状态失败", { error, apiKeyId, userId });
+      throw error;
+    }
+  }
+}
+
+// 导出服务实例
+export const apiKeyService = new ApiKeyService();
+
+// 默认导出
+export default apiKeyService;

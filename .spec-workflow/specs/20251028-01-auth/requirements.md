@@ -1,25 +1,25 @@
-# 认证与 API 密钥管理需求文档
+# Requirements Document
 
-## 简介
+## Introduction
 
 本文档定义了 `claude-code-router` 新增的用户认证、API 密钥管理及相关功能的需求。目标是提供一个安全的、基于角色的访问控制系统，允许用户通过飞书登录并管理自己的 API 密钥以访问路由服务。
 
-## 产品愿景对齐
+## Alignment with Product Vision
 
-此认证系统支持项目.md 中定义的核心目标：
+此认证系统支持产品.md 中定义的核心目标：
 
 - **解除地域限制**: 通过安全的API密钥管理，确保用户可以安全地通过代理服务访问 Claude Code
 - **用户管理与访问控制**: 实现基于飞书OAuth的用户认证和多API密钥管理
 - **安全性**: 通过强哈希算法和安全认证流程保护用户API密钥
 - **易用性**: 提供Web UI简化配置管理，包括API密钥的创建和管理
 
-## 需求
+## Requirements
 
-### 需求1: 用户认证 (UI)
+### Requirement 1
 
-**用户故事:** 作为 claude-code-router 的用户，我希望通过飞书登录，以便安全地访问路由管理界面。
+**User Story:** 作为 claude-code-router 的用户，我希望通过飞书登录，以便安全地访问路由管理界面。
 
-#### 验收标准
+#### Acceptance Criteria
 
 1. WHEN 用户访问UI时 THEN 系统 SHALL 重定向到飞书OAuth登录
 2. WHEN 用户完成飞书OAuth授权时 THEN 系统 SHALL 自动创建用户账户（如果不存在）
@@ -28,11 +28,11 @@
 5. WHEN 用户已登录时 THEN 系统 SHALL 显示从飞书同步的基本信息（姓名、头像）
 6. WHEN 管理员用户登录时 THEN 系统 SHALL 显示管理员特定功能入口
 
-### 需求2: API认证 (后端服务)
+### Requirement 2
 
-**用户故事:** 作为客户端应用程序，我希望使用API密钥进行身份验证，以便安全地访问核心路由API。
+**User Story:** 作为客户端应用程序，我希望使用API密钥进行身份验证，以便安全地访问核心路由API。
 
-#### 验收标准
+#### Acceptance Criteria
 
 1. WHEN 访问 `/v1/messages` API时 THEN 系统 SHALL 要求通过用户生成的API密钥进行认证
 2. WHEN 发出API请求时 THEN 系统 SHALL 接受通过 `Authorization: Bearer <API_KEY>` 或 `X-Api-Key: <API_KEY>` 请求头的认证
@@ -41,11 +41,11 @@
 5. WHEN 创建API密钥时 THEN 系统 SHALL 将其与特定用户账户关联
 6. WHEN 记录日志或响应时 THEN 系统 SHALL NOT 明文存储或返回完整的API密钥
 
-### 需求3: API密钥管理 (UI)
+### Requirement 3
 
-**用户故事:** 作为已登录用户，我希望管理我的API密钥，以便控制对路由服务的访问。
+**User Story:** 作为已登录用户，我希望管理我的API密钥，以便控制对路由服务的访问。
 
-#### 验收标准
+#### Acceptance Criteria
 
 1. WHEN 用户已登录时 THEN 用户 SHALL 能够创建新的API密钥
 2. WHEN 创建API密钥时 THEN 用户 SHALL 能够为其指定名称
@@ -55,63 +55,63 @@
 6. WHEN 删除API密钥时 THEN 系统 SHALL 在删除前显示确认提示
 7. WHEN 管理API密钥时 THEN 用户 SHALL 能够设置独立的配额规则（请求限制和时间窗口）
 
-### 需求4: 用户角色与权限
+### Requirement 4
 
-**用户故事:** 作为系统管理员，我希望拥有 elevated 权限，以便管理用户级配额和系统设置。
+**User Story:** 作为系统管理员，我希望拥有 elevated 权限，以便管理用户级配额和系统设置。
 
-#### 验收标准
+#### Acceptance Criteria
 
 1. WHEN 创建用户时 THEN 系统 SHALL 区分普通用户和管理员用户 (`is_admin`)
 2. WHEN 用户通过飞书登录时 THEN 默认 SHALL 为普通用户
 3. WHEN 管理员访问系统时 THEN SHALL 拥有额外权限，如设置用户级配额
 4. WHEN 普通用户访问系统时 THEN 只能管理自己的API密钥和查看自己的请求历史
 
-### 需求5: 安全性
+### Requirement 5
 
-**用户故事:** 作为系统所有者，我希望有强大的安全措施，以便保护用户API密钥和身份数据。
+**User Story:** 作为系统所有者，我希望有强大的安全措施，以便保护用户API密钥和身份数据。
 
-#### 验收标准
+#### Acceptance Criteria
 
 1. WHEN 存储API密钥时 THEN 系统 SHALL 使用带盐的强哈希算法（bcrypt或Argon2）
 2. WHEN 验证API密钥时 THEN 系统 SHALL 使用恒定时间比较以防止时序攻击
 3. WHEN 管理UI登录状态时 THEN 系统 SHALL 实施安全措施（HttpOnly Cookie，安全签名密钥）
 4. WHEN 集成飞书OAuth时 THEN 系统 SHALL 安全存储App ID和App Secret，不进行硬编码
 
-## 非功能性需求
+## Non-Functional Requirements
 
-### 代码架构和模块化
+### Code Architecture and Modularity
 
-- **单一职责原则**: 每个认证组件应具有单一、明确定义的目的
-- **模块化设计**: 认证、授权和密钥管理应隔离且可重用
-- **依赖管理**: 最小化认证模块与核心路由逻辑之间的相互依赖
-- **清晰接口**: 定义组件和层之间的清晰契约
+- **Single Responsibility Principle**: 每个认证组件应具有单一、明确定义的目的
+- **Modular Design**: 认证、授权和密钥管理应隔离且可重用
+- **Dependency Management**: 最小化认证模块与核心路由逻辑之间的相互依赖
+- **Clear Interfaces**: 定义组件和层之间的清晰契约
 
-### 性能
+### Performance
 
 - API密钥验证过程的性能开销应最小，目标P99延迟 < 50ms（不包括数据库查询）
 - 用户登录过程应流畅，目标P99 < 500ms用于飞书回调处理（不包括飞书响应时间）
 
-### 安全性
+### Security
 
 - API密钥必须使用带盐的强哈希算法
 - 认证必须使用恒定时间比较以防止时序攻击
 - UI登录状态管理必须实施安全措施（HttpOnly cookies，安全签名密钥）
 - 飞书OAuth凭证必须安全存储，不进行硬编码
 
-### 可靠性
+### Reliability
 
 - 认证系统应优雅处理飞书服务中断
 - API密钥验证应能抵御数据库连接问题
 - 当使用适当存储时，用户会话应在服务重启后保持持久
 
-### 可用性
+### Usability
 
 - API密钥创建流程应直观，有清晰的说明
 - 认证失败的错误消息应用户友好，但不泄露敏感信息
 - 管理界面应清晰区分管理员和用户特定功能
 
-## 假设和约束
+## Assumptions and Constraints
 
-- **假设**: 飞书开放平台提供可靠的OAuth2服务
-- **约束**: 初始版本仅支持飞书作为唯一登录方式
-- **约束**: 系统部署环境能够安全管理飞书App Secret和JWT/Session密钥
+- **Assumption**: 飞书开放平台提供可靠的OAuth2服务
+- **Constraint**: 初始版本仅支持飞书作为唯一登录方式
+- **Constraint**: 系统部署环境能够安全管理飞书App Secret和JWT/Session密钥

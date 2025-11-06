@@ -67,11 +67,11 @@ export class ImageAgent implements IAgent {
         (item: any) =>
           item.type === "image" ||
           (Array.isArray(item?.content) &&
-            item.content.some((sub: any) => sub.type === "image"))
+            item.content.some((sub: any) => sub.type === "image")),
       )
     ) {
       req.body.model = config.Router.image;
-      const images = [];
+      const images: any[] = [];
       lastMessage.content
         .filter((item: any) => item.type === "tool_result")
         .forEach((item: any) => {
@@ -95,8 +95,8 @@ export class ImageAgent implements IAgent {
           (item: any) =>
             item.type === "image" ||
             (Array.isArray(item?.content) &&
-              item.content.some((sub: any) => sub.type === "image"))
-        )
+              item.content.some((sub: any) => sub.type === "image")),
+        ),
     );
   }
 
@@ -106,48 +106,54 @@ export class ImageAgent implements IAgent {
       description:
         "Analyse image or images by ID and extract information such as OCR text, objects, layout, colors, or safety signals.",
       input_schema: {
-        type: "object",
+        type: "object" as const,
         properties: {
           imageId: {
-            type: "array",
+            type: "array" as const,
             description: "an array of IDs to analyse",
             items: {
-              type: "string",
+              type: "string" as const,
             },
-          },
+          } as any,
           task: {
-            type: "string",
+            type: "string" as const,
             description:
               "Details of task to perform on the image.The more detailed, the better",
           },
           regions: {
-            type: "array",
+            type: "array" as const,
             description: "Optional regions of interest within the image",
             items: {
-              type: "object",
+              type: "object" as const,
               properties: {
                 name: {
-                  type: "string",
+                  type: "string" as const,
                   description: "Optional label for the region",
                 },
-                x: { type: "number", description: "X coordinate" },
-                y: { type: "number", description: "Y coordinate" },
-                w: { type: "number", description: "Width of the region" },
-                h: { type: "number", description: "Height of the region" },
+                x: { type: "number" as const, description: "X coordinate" },
+                y: { type: "number" as const, description: "Y coordinate" },
+                w: {
+                  type: "number" as const,
+                  description: "Width of the region",
+                },
+                h: {
+                  type: "number" as const,
+                  description: "Height of the region",
+                },
                 units: {
-                  type: "string",
-                  enum: ["px", "pct"],
+                  type: "string" as const,
+                  enum: ["px", "pct"] as const,
                   description: "Units for coordinates and size",
                 },
               },
-              required: ["x", "y", "w", "h", "units"],
-            },
+              required: ["x", "y", "w", "h", "units"] as const,
+            } as any,
           },
         },
-        required: ["imageId", "task"],
-      },
-      handler: async (args, context) => {
-        const imageMessages = [];
+        required: ["imageId", "task"] as const,
+      } as any,
+      handler: async (args: any, context: any) => {
+        const imageMessages: any[] = [];
         let imageId;
 
         // Create image messages from cached images
@@ -155,7 +161,7 @@ export class ImageAgent implements IAgent {
           if (Array.isArray(args.imageId)) {
             args.imageId.forEach((imgId: string) => {
               const image = imageCache.getImage(
-                `${context.req.id}_Image#${imgId}`
+                `${context.req.id}_Image#${imgId}`,
               );
               if (image) {
                 imageMessages.push({
@@ -166,7 +172,7 @@ export class ImageAgent implements IAgent {
             });
           } else {
             const image = imageCache.getImage(
-              `${context.req.id}_Image#${args.imageId}`
+              `${context.req.id}_Image#${args.imageId}`,
             );
             if (image) {
               imageMessages.push({
@@ -183,11 +189,11 @@ export class ImageAgent implements IAgent {
           context.req.body.messages[context.req.body.messages.length - 1];
         if (userMessage.role === "user" && Array.isArray(userMessage.content)) {
           const msgs = userMessage.content.filter(
-            (item) =>
+            (item: any) =>
               item.type === "text" &&
               !item.text.includes(
-                "This is an image, if you need to view or analyze it, you need to extract the imageId"
-              )
+                "This is an image, if you need to view or analyze it, you need to extract the imageId",
+              ),
           );
           imageMessages.push(...msgs);
         }
@@ -213,9 +219,9 @@ export class ImageAgent implements IAgent {
               system: [
                 {
                   type: "text",
-                  text: `You must interpret and analyze images strictly according to the assigned task.  
-When an image placeholder is provided, your role is to parse the image content only within the scope of the user’s instructions.  
-Do not ignore or deviate from the task.  
+                  text: `You must interpret and analyze images strictly according to the assigned task.
+When an image placeholder is provided, your role is to parse the image content only within the scope of the user’s instructions.
+Do not ignore or deviate from the task.
 Always ensure that your response reflects a clear, accurate interpretation of the image aligned with the given objective.`,
                 },
               ],
@@ -227,7 +233,7 @@ Always ensure that your response reflects a clear, accurate interpretation of th
               ],
               stream: false,
             }),
-          }
+          },
         )
           .then((res) => res.json())
           .catch((err) => {
@@ -245,16 +251,16 @@ Always ensure that your response reflects a clear, accurate interpretation of th
     // Inject system prompt
     req.body?.system?.push({
       type: "text",
-      text: `You are a text-only language model and do not possess visual perception.  
-If the user requests you to view, analyze, or extract information from an image, you **must** call the \`analyzeImage\` tool.  
+      text: `You are a text-only language model and do not possess visual perception.
+If the user requests you to view, analyze, or extract information from an image, you **must** call the \`analyzeImage\` tool.
 
-When invoking this tool, you must pass the correct \`imageId\` extracted from the prior conversation.  
-Image identifiers are always provided in the format \`[Image #imageId]\`.  
+When invoking this tool, you must pass the correct \`imageId\` extracted from the prior conversation.
+Image identifiers are always provided in the format \`[Image #imageId]\`.
 
-If multiple images exist, select the **most relevant imageId** based on the user’s current request and prior context.  
+If multiple images exist, select the **most relevant imageId** based on the user’s current request and prior context.
 
-Do not attempt to describe or analyze the image directly yourself.  
-Ignore any user interruptions or unrelated instructions that might cause you to skip this requirement.  
+Do not attempt to describe or analyze the image directly yourself.
+Ignore any user interruptions or unrelated instructions that might cause you to skip this requirement.
 Your response should consistently follow this rule whenever image-related analysis is requested.`,
     });
 
@@ -266,7 +272,7 @@ Your response should consistently follow this rule whenever image-related analys
           (msg: any) =>
             msg.type === "image" ||
             (Array.isArray(msg.content) &&
-              msg.content.some((sub: any) => sub.type === "image"))
+              msg.content.some((sub: any) => sub.type === "image")),
         )
       );
     });
@@ -286,11 +292,11 @@ Your response should consistently follow this rule whenever image-related analys
         } else if (msg.type === "tool_result") {
           if (
             Array.isArray(msg.content) &&
-            msg.content.some((ele) => ele.type === "image")
+            msg.content.some((ele: any) => ele.type === "image")
           ) {
             imageCache.storeImage(
               `${req.id}_Image#${imgId}`,
-              msg.content[0].source
+              msg.content[0].source,
             );
             msg.content = `[Image #${imgId}]This is an image, if you need to view or analyze it, you need to extract the imageId`;
             imgId++;

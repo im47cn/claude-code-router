@@ -1,0 +1,137 @@
+import { FastifySchema, FastifyRequest, FastifyReply } from "fastify";
+import { sendErrorResponse } from "./errorHandler";
+
+// 通用验证错误处理器
+export function validationErrorHandler(
+  error: any,
+  request: FastifyRequest,
+  reply: FastifyReply,
+) {
+  reply.status(400).send({
+    error: "Validation Failed",
+    message: "请求参数不符合规范",
+    details: error.validation.map((err: any) => ({
+      field: err.dataPath.substring(1), // remove leading '.'
+      message: err.message,
+    })),
+  });
+}
+
+/**
+ * 验证请求体中间件
+ */
+export function validateBody(schema: FastifySchema) {
+  return async (request: FastifyRequest, reply: FastifyReply, done: Function) => {
+    try {
+      // 处理空 body
+      if (request.body === null || request.body === undefined) {
+        sendErrorResponse(
+          reply,
+          "VALIDATION_FAILED" as any,
+          "Request body is required",
+          request
+        );
+        return;
+      }
+
+      // 使用 Fastify 内置验证
+      const { compileValidationSchema } = await import("fastify");
+      const validate = compileValidationSchema(schema, {
+        dataVarName: "body",
+      });
+
+      const isOk = validate({ body: request.body });
+
+      if (isOk) {
+        done();
+      } else {
+        sendErrorResponse(
+          reply,
+          "VALIDATION_FAILED" as any,
+          "Request body validation failed",
+          request,
+          { errors: validate.errors }
+        );
+      }
+    } catch (error) {
+      sendErrorResponse(
+        reply,
+        "INTERNAL_ERROR" as any,
+        "Validation schema error",
+        request
+      );
+    }
+  };
+}
+
+/**
+ * 验证路径参数中间件
+ */
+export function validateParams(schema: FastifySchema) {
+  return async (request: FastifyRequest, reply: FastifyReply, done: Function) => {
+    try {
+      // 使用 Fastify 内置验证
+      const { compileValidationSchema } = await import("fastify");
+      const validate = compileValidationSchema(schema, {
+        dataVarName: "params",
+      });
+
+      const isOk = validate({ params: request.params });
+
+      if (isOk) {
+        done();
+      } else {
+        sendErrorResponse(
+          reply,
+          "VALIDATION_FAILED" as any,
+          "Request parameters validation failed",
+          request,
+          { errors: validate.errors }
+        );
+      }
+    } catch (error) {
+      sendErrorResponse(
+        reply,
+        "INTERNAL_ERROR" as any,
+        "Validation schema error",
+        request
+      );
+    }
+  };
+}
+
+/**
+ * 验证查询参数中间件
+ */
+export function validateQuery(schema: FastifySchema) {
+  return async (request: FastifyRequest, reply: FastifyReply, done: Function) => {
+    try {
+      // 使用 Fastify 内置验证
+      const { compileValidationSchema } = await import("fastify");
+      const validate = compileValidationSchema(schema, {
+        dataVarName: "query",
+      });
+
+      const isOk = validate({ query: request.query });
+
+      if (isOk) {
+        done();
+      } else {
+        sendErrorResponse(
+          reply,
+          "VALIDATION_FAILED" as any,
+          "Query parameters validation failed",
+          request,
+          { errors: validate.errors }
+        );
+      }
+    } catch (error) {
+      sendErrorResponse(
+        reply,
+        "INTERNAL_ERROR" as any,
+        "Validation schema error",
+        request
+      );
+    }
+  };
+}

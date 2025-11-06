@@ -1,0 +1,149 @@
+// Prisma schema for claude-code-router authentication and quota management
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// 用户表 - 存储用户基本信息
+model User {
+  id          String   @id @default(cuid())
+  name        String
+  avatarUrl   String?  @map("avatar_url")
+  isActive    Boolean  @default(true) @map("is_active")
+  isAdmin     Boolean  @default(false) @map("is_admin")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // 关联关系
+  identities   UserIdentity[]
+  apiKeys      ApiKey[]
+  userQuotas   UserQuota[]
+  requestLogs  RequestLog[]
+
+  @@map("users")
+}
+
+// 用户身份表 - 存储不同平台的用户身份信息
+model UserIdentity {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  provider    String   // feishu, github, etc.
+  providerId  String   @map("provider_id") // 平台用户ID
+  accessToken String?  @map("access_token")
+  refreshToken String? @map("refresh_token")
+  expiresAt   DateTime? @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  // 关联关系
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerId])
+  @@map("user_identities")
+}
+
+// API密钥表
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String    @map("user_id")
+  name       String
+  keyHash    String    @map("key_hash")
+  keyPrefix  String    @map("key_prefix") // sk-xxxxxxxx, 用于前端显示
+  isActive   Boolean   @default(true) @map("is_active")
+  lastUsedAt DateTime? @map("last_used_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+  updatedAt  DateTime  @updatedAt @map("updated_at")
+
+  // 关联关系
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  apiKeyQuota  ApiKeyQuota?
+  requestLogs  RequestLog[]
+
+  @@map("api_keys")
+  @@index([keyPrefix, isActive])
+  @@index([keyHash])
+}
+
+// 用户配额表
+model UserQuota {
+  id           String   @id @default(cuid())
+  userId       String   @map("user_id")
+  requestLimit Int      @map("request_limit")
+  timeWindow   Int      @map("time_window")
+  currentCount Int      @default(0) @map("current_count")
+  windowStartAt DateTime @default(now()) @map("window_start_at")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // 关联关系
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId])
+  @@map("user_quotas")
+}
+
+// API密钥配额表
+model ApiKeyQuota {
+  id           String   @id @default(cuid())
+  apiKeyId     String   @map("api_key_id")
+  requestLimit Int      @map("request_limit")
+  timeWindow   Int      @map("time_window")
+  currentCount Int      @default(0) @map("current_count")
+  windowStartAt DateTime @default(now()) @map("window_start_at")
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  // 关联关系
+  apiKey ApiKey @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+
+  @@unique([apiKeyId])
+  @@index([apiKeyId])
+  @@map("api_key_quotas")
+}
+
+
+// 请求日志表 - 记录所有API请求
+model RequestLog {
+  id            String    @id @default(cuid())
+  userId        String?   @map("user_id")
+  apiKeyId      String?   @map("api_key_id")
+  requestId     String?   @map("request_id") // 请求唯一ID
+  method        String
+  path          String
+  statusCode    Int       @map("status_code")
+  responseTime  Int       @map("response_time") // 响应时间，单位：毫秒
+  requestSize   Int?      @map("request_size") // 请求大小，单位：字节
+  responseSize  Int?      @map("response_size") // 响应大小，单位：字节
+  userAgent     String?   @map("user_agent")
+  ipAddress     String?   @map("ip_address")
+  errorMessage  String?   @map("error_message")
+  createdAt     DateTime  @default(now()) @map("created_at")
+
+  // 关联关系
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  apiKey ApiKey? @relation(fields: [apiKeyId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([apiKeyId])
+  @@index([createdAt])
+  @@index([requestId])
+  @@map("request_logs")
+}
+
+// 系统配置表 - 存储系统级别的配置
+model SystemConfig {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String   // JSON格式的配置值
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_config")
+}
