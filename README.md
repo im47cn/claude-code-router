@@ -8,7 +8,7 @@
 
 ![](blog/images/sponsors/glm-en.jpg)
 > This project is sponsored by Z.ai, supporting us with their GLM CODING PLAN.    
-> GLM CODING PLAN is a subscription service designed for AI coding, starting at just $3/month. It provides access to their flagship GLM-4.6 model across 10+ popular AI coding tools (Claude Code, Cline, Roo Code, etc.), offering developers top-tier, fast, and stable coding experiences.     
+> GLM CODING PLAN is a subscription service designed for AI coding, starting at just $3/month. It provides access to their flagship GLM-4.6 model across 10+ popular AI coding tools (Claude Code, Roo Code, etc.), offering developers top-tier, fast, and stable coding experiences.     
 > Get 10% OFF GLM CODING PLAN：https://z.ai/subscribe?ic=8JVLJQFSKB     
 
 > A powerful tool to route Claude Code requests to different models and customize any request.
@@ -55,7 +55,7 @@ The `config.json` file has several key sections:
 - **Logging Systems**: The Claude Code Router uses two separate logging systems:
   - **Server-level logs**: HTTP requests, API calls, and server events are logged using pino in the `~/.claude-code-router/logs/` directory with filenames like `ccr-*.log`
   - **Application-level logs**: Routing decisions and business logic events are logged in `~/.claude-code-router/claude-code-router.log`
-- **`APIKEY`** (optional): You can set a secret key to authenticate requests. When set, clients must provide this key in the `Authorization` header (e.g., `Bearer your-secret-key`) or the `x-api-key` header. Example: `"APIKEY": "your-secret-key"`.
+- **`APIKEY`** (optional): You can set a secret key to authenticate requests to CCR. When set, clients must provide this key in the `x-api-key` header. Note: If the client provides an OAuth token (`Authorization: Bearer`), the request will be allowed through regardless of `APIKEY` configuration. Example: `"APIKEY": "your-secret-key"`.
 - **`HOST`** (optional): You can set the host address for the server. If `APIKEY` is not set, the host will be forced to `127.0.0.1` for security reasons to prevent unauthorized access. Example: `"HOST": "0.0.0.0"`.
 - **`NON_INTERACTIVE_MODE`** (optional): When set to `true`, enables compatibility with non-interactive environments like GitHub Actions, Docker containers, or other CI/CD systems. This sets appropriate environment variables (`CI=true`, `FORCE_COLOR=0`, etc.) and configures stdin handling to prevent the process from hanging in automated environments. Example: `"NON_INTERACTIVE_MODE": true`.
 
@@ -407,11 +407,118 @@ The `Router` object defines which model to use for different scenarios:
 - `longContext`: A model for handling long contexts (e.g., > 60K tokens).
 - `longContextThreshold` (optional): The token count threshold for triggering the long context model. Defaults to 60000 if not specified.
 - `webSearch`: Used for handling web search tasks and this requires the model itself to support the feature. If you're using openrouter, you need to add the `:online` suffix after the model name.
-- `image` (beta): Used for handling image-related tasks (supported by CCR’s built-in agent). If the model does not support tool calling, you need to set the `config.forceUseImageAgent` property to `true`.
+- `image` (beta): Used for handling image-related tasks (supported by CCR's built-in agent). If the model does not support tool calling, you need to set the `config.forceUseImageAgent` property to `true`.
 
 - You can also switch models dynamically in Claude Code with the `/model` command:
 `/model provider_name,model_name`
 Example: `/model openrouter,anthropic/claude-3.5-sonnet`
+
+#### Authentication Configuration (String-Based)
+
+You can configure authentication strategies directly in the model string using a simple syntax. This allows fine-grained control over which authentication method to use for different routes.
+
+**Syntax**: `provider,model;auth=<method>;fallback=<method>;subagent=<enable|disable>`
+
+**Authentication Methods**:
+- `oauth`: Use OAuth Bearer token (from Claude Code authentication)
+- `api-key`: Use provider's API key
+- `none`: No authentication
+
+**Example Configurations**:
+
+```json
+{
+  "Router": {
+    // Default: OAuth with API key fallback
+    "default": "anthropic,claude-3-5-sonnet;auth=oauth,fallback=api-key",
+
+    // Background: API key only (cost-effective for subagents)
+    "background": "openrouter,claude-3-haiku;auth=api-key;subagent=disable",
+
+    // Think: OAuth only (high security for reasoning)
+    "think": "anthropic,claude-3-opus;auth=oauth",
+
+    // Long Context: OAuth with fallback
+    "longContext": "anthropic,claude-3-opus;auth=oauth,fallback=api-key",
+
+    // Web Search: OAuth with fallback
+    "webSearch": "perplexity,pplx-70b-online;auth=oauth,fallback=api-key"
+  }
+}
+```
+
+**Quick Syntax**:
+- `;oauth` = `;auth=oauth,fallback=api-key` (OAuth with API key fallback)
+- `;auth=api-key` = Use only API key
+- `;subagent=disable` = Disable OAuth passthrough for subagents
+
+**Default Behavior** (when no auth directives are specified):
+- `default/think/longContext`: OAuth first, API key fallback
+- `webSearch/background/subagent`: API key only (cost control)
+
+**Authentication Flow**:
+1. Try primary authentication method
+2. If failed, try fallback method
+3. Final fallback to any available auth
+4. Subagent requests respect `subagent` setting
+
+This approach provides maximum flexibility with minimal configuration overhead, while maintaining full backward compatibility with existing configurations.
+
+#### OAuth Router Support
+
+Claude Code Router supports dynamic routing for OAuth requests based on special router markers in the system message. This allows OAuth requests to be routed to specific models while maintaining authentication.
+
+**Usage**: Include `<CCR-SUBAGENT-ROUTER>router_name</CCR-SUBAGENT-ROUTER>` in your OAuth request's system message to route it to a specific router configuration.
+
+**Example Configuration**:
+
+```json
+{
+  "Router": {
+    "default": "gemini-cli,gemini-2.5-pro",
+    "background": "gemini-cli,gemini-2.5-flash",
+    "frontend": "openrouter,anthropic/claude-3.5-sonnet",
+    "backend": "deepseek,deepseek-chat",
+    "architect": "openrouter,anthropic/claude-sonnet-4",
+    "devops": "gemini-cli,gemini-2.5-pro"
+  }
+}
+```
+
+**Example OAuth Request with Router Marker**:
+
+```json
+{
+  "grant_type": "authorization_code",
+  "code": "test-code",
+  "client_id": "test-client",
+  "system": [
+    { "type": "text", "text": "You are a helpful assistant" },
+    { "type": "text", "text": "<CCR-SUBAGENT-ROUTER>frontend</CCR-SUBAGENT-ROUTER>" }
+  ]
+}
+```
+
+**Dynamic Router Names**:
+- `frontend`: Routes to the frontend-specific model configuration
+- `backend`: Routes to the backend-specific model configuration
+- `architect`: Routes to the architect-specific model configuration
+- `devops`: Routes to the DevOps-specific model configuration
+- Any custom router name defined in your configuration
+
+**Behavior**:
+- **With Router Marker**: OAuth requests are routed to the specified model configuration
+- **Without Router Marker**: OAuth requests are transparently forwarded (bypass model routing)
+- **Invalid Router Name**: Falls back to transparent forwarding with warning logged
+- **Marker Cleanup**: Router markers are automatically cleaned from system messages
+
+**OAuth Endpoints Supported**:
+- `/v1/oauth/token` - Token exchange
+- `/v1/oauth/refresh` - Token refresh
+- `/v1/oauth/userinfo` - User information
+- `/oauth/token` - Alternative token endpoint
+
+This feature provides dynamic routing capabilities for OAuth-based integrations while maintaining backward compatibility with existing OAuth workflows.
 
 #### Custom Router
 
@@ -462,6 +569,7 @@ For routing within subagents, you must specify a particular provider and model b
 <CCR-SUBAGENT-MODEL>openrouter,anthropic/claude-3.5-sonnet</CCR-SUBAGENT-MODEL>
 Please help me analyze this code snippet for potential optimizations...
 ```
+
 
 ## Status Line (Beta)
 To better monitor the status of claude-code-router at runtime, version v1.0.40 includes a built-in statusline tool, which you can enable in the UI.

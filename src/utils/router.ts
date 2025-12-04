@@ -13,6 +13,124 @@ import { LRUCache } from "lru-cache";
 
 const enc = get_encoding("cl100k_base");
 
+/**
+ * 安全地将值转换为字符串用于日志记录
+ */
+function safeStringifyForLog(value: any): string {
+  if (value === null || value === undefined) {
+    return 'undefined';
+  }
+
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+
+  if (typeof value === 'object') {
+    try {
+      // 防止 [object Object] 问题：如果对象已经被转换为字符串，直接返回
+      if (typeof value.toString === 'function' && value.toString() === '[object Object]') {
+        // 对于有问题的对象，尝试提取关键属性
+        if (value.type !== undefined) {
+          return `thinking: ${value.type}`;
+        }
+        if (value.enabled !== undefined) {
+          return `thinking: ${value.enabled ? 'enabled' : 'disabled'}`;
+        }
+        if (value.budget_tokens !== undefined) {
+          return `thinking: budget=${value.budget_tokens}`;
+        }
+        // 如果没有关键属性，返回通用描述
+        return 'thinking: object';
+      }
+
+      // 对于正常对象，提取关键信息而不是完整 JSON
+      if (value && typeof value === 'object' && value.type) {
+        return `thinking: ${value.type}`;
+      }
+      if (value && typeof value === 'object' && value.enabled !== undefined) {
+        return `thinking: ${value.enabled ? 'enabled' : 'disabled'}`;
+      }
+      if (value && typeof value === 'object' && value.budget_tokens !== undefined) {
+        return `thinking: budget=${value.budget_tokens}`;
+      }
+      // 回退到 JSON 字符串，但限制长度
+      const json = JSON.stringify(value);
+      return json.length > 50 ? json.substring(0, 47) + '...' : json;
+    } catch {
+      return 'thinking: [Object]';
+    }
+  }
+
+  return String(value);
+}
+
+/**
+ * Detects if the request is a ClaudeMem request based on message content
+ * ClaudeMem requests contain specific system prompt patterns
+ *
+ * Uses precise patterns to avoid false positives from casual mentions
+ */
+export const isClaudeMemRequest = (messages: MessageParam[]): boolean => {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return false;
+  }
+
+  // ClaudeMem system prompt pattern (case-insensitive)
+  // Based on actual ClaudeMem system prompt: "You are a Claude-Mem, a specialized observer tool..."
+  const claudeMemPattern = 'you are a claude-mem';
+
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      if (message.content.toLowerCase().includes(claudeMemPattern)) {
+        return true;
+      }
+    } else if (Array.isArray(message.content)) {
+      for (const contentPart of message.content) {
+        if (contentPart.type === 'text' &&
+            typeof (contentPart as any).text === 'string') {
+          if ((contentPart as any).text.toLowerCase().includes(claudeMemPattern)) {
+            return true;
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+};
+
+/**
+ * OAuth Router marker detection functions
+ */
+const detectOAuthRouterMarker = (system: any[]): string | null => {
+  if (!Array.isArray(system) || system.length <= 1) return null;
+
+  const systemText = system[1]?.text;
+  if (typeof systemText !== 'string') return null;
+
+  const routerMatch = systemText.match(/<CCR-SUBAGENT-ROUTER>(.*?)<\/CCR-SUBAGENT-ROUTER>/s);
+  return routerMatch ? routerMatch[1] : null;
+};
+
+const isValidRouter = (routerName: string, config: any): boolean => {
+  return config && config.Router && typeof config.Router[routerName] === 'string';
+};
+
+const cleanRouterMarker = (system: any[], routerName: string): void => {
+  if (system.length > 1 && typeof system[1]?.text === 'string') {
+    system[1].text = system[1].text.replace(
+      `<CCR-SUBAGENT-ROUTER>${routerName}</CCR-SUBAGENT-ROUTER>`,
+      ""
+    );
+    // Also clean any CCR-SUBAGENT-MODEL markers since OAuth routing takes priority
+    system[1].text = system[1].text.replace(
+      /<CCR-SUBAGENT-MODEL>.*?<\/CCR-SUBAGENT-MODEL>/gs,
+      ""
+    );
+  }
+};
+
+
 export const calculateTokenCount = (
   messages: MessageParam[],
   system: any,
@@ -139,9 +257,12 @@ const getUseModel = async (
     );
     return Router.longContext;
   }
+  // Only process CCR-SUBAGENT-MODEL if OAuth routing hasn't already set the model
+  // This gives OAuth Router markers priority over SUBAGENT-MODEL specifications
   if (
     req.body?.system?.length > 1 &&
-    req.body?.system[1]?.text?.startsWith("<CCR-SUBAGENT-MODEL>")
+    req.body?.system[1]?.text?.includes("<CCR-SUBAGENT-MODEL>") &&
+    !req.isOAuthRequest
   ) {
     const model = req.body?.system[1].text.match(
       /<CCR-SUBAGENT-MODEL>(.*?)<\/CCR-SUBAGENT-MODEL>/s
@@ -160,7 +281,7 @@ const getUseModel = async (
     req.body.model?.includes("haiku") &&
     config.Router.background
   ) {
-    req.log.info(`Using background model for ${req.body.model}`);
+    req.log.info(`Using background model for ${safeStringifyForLog(req.body.model)}`);
     return config.Router.background;
   }
   // The priority of websearch must be higher than thinking.
@@ -173,15 +294,81 @@ const getUseModel = async (
   }
   // if exits thinking, use the think model
   if (req.body.thinking && Router.think) {
-    req.log.info(`Using think model for ${req.body.thinking}`);
+    req.log.info(`Using think model for ${safeStringifyForLog(req.body.thinking)}`);
     return Router.think;
   }
-  return Router!.default;
+
+
+  return Router?.default || 'openrouter,anthropic/claude-3.5-sonnet';
 };
 
 export const router = async (req: any, _res: any, context: any) => {
   const { config, event } = context;
-  // Parse sessionId from metadata.user_id
+
+  // Router marker detection and conditional routing (applies to all requests, not just OAuth)
+  const routerName = detectOAuthRouterMarker(req.body?.system);
+
+  if (routerName) {
+    // Request with router marker - apply model routing
+    if (isValidRouter(routerName, config)) {
+      if (req.isOAuthRequest) {
+        req.log?.info({
+          url: req.url,
+          method: req.method,
+          oauthRequestType: req.oauthRequestType,
+          routerName: routerName,
+          targetModel: config.Router[routerName]
+        }, 'OAuth request with router marker - applying model routing');
+      } else {
+        req.log?.info({
+          url: req.url,
+          method: req.method,
+          routerName: routerName,
+          targetModel: config.Router[routerName]
+        }, 'Request with router marker - applying model routing');
+      }
+
+      // Clean router marker from system message
+      cleanRouterMarker(req.body.system, routerName);
+
+      // Set target model and continue with normal processing
+      req.body.model = config.Router[routerName];
+    } else {
+      req.log?.warn({
+        routerName: routerName,
+        availableRouters: Object.keys(config?.Router || {}),
+        isOAuthRequest: req.isOAuthRequest
+      }, 'Router marker references non-existent router - cleaning marker and falling back to default routing');
+
+      // Clean invalid router marker and fall back to default routing
+      cleanRouterMarker(req.body.system, routerName);
+    }
+  } else if (req.isOAuthRequest) {
+    // OAuth request without router marker - transparent forwarding
+    // Log detailed information for transparent forwarding requests
+    const originalModel = req.body?.model;
+    const hasThinking = !!req.body?.thinking;
+    const messageCount = Array.isArray(req.body?.messages) ? req.body.messages.length : 0;
+    const toolCount = Array.isArray(req.body?.tools) ? req.body.tools.length : 0;
+
+    req.log?.info({
+      url: req.url,
+      method: req.method,
+      oauthRequestType: req.oauthRequestType,
+      oauthConfidence: req.oauthConfidence,
+      model: originalModel,
+      hasThinking: hasThinking,
+      thinkingBudget: hasThinking ? req.body.thinking.budget_tokens : undefined,
+      messageCount: messageCount,
+      toolCount: toolCount,
+      maxTokens: req.body?.max_tokens,
+      stream: req.body?.stream,
+      isTransparent: true
+    }, 'Transparent forwarding - OAuth request bypassing model routing');
+    return;
+  }
+
+  // Parse sessionId from metadata.user_id (client-generated, no validation needed)
   if (req.body.metadata?.user_id) {
     const parts = req.body.metadata.user_id.split("_session_");
     if (parts.length > 1) {
@@ -190,13 +377,19 @@ export const router = async (req: any, _res: any, context: any) => {
   }
   const lastMessageUsage = sessionUsageCache.get(req.sessionId);
   const { messages, system = [], tools }: MessageCreateParamsBase = req.body;
+
+  // Store original auth type for logging (now handled in auth middleware)
+  const originalAuthType = req.authType;
   if (
     config.REWRITE_SYSTEM_PROMPT &&
     system.length > 1 &&
-    system[1]?.text?.includes("<env>")
+    system[1] &&
+    typeof system[1].text === 'string' &&
+    system[1].text.includes("<env>")
   ) {
     const prompt = await readFile(config.REWRITE_SYSTEM_PROMPT, "utf-8");
-    system[1].text = `${prompt}<env>${system[1].text.split("<env>").pop()}`;
+    const envPart = system[1].text.split("<env>").pop() || "";
+    system[1].text = `${prompt}<env>${envPart}`;
   }
 
   try {
@@ -221,11 +414,24 @@ export const router = async (req: any, _res: any, context: any) => {
     if (!model) {
       model = await getUseModel(req, tokenCount, config, lastMessageUsage);
     }
+
     req.body.model = model;
   } catch (error: any) {
     req.log.error(`Error in router middleware: ${error.message}`);
-    req.body.model = config.Router!.default;
+    req.body.model = config.Router?.default || 'openrouter,anthropic/claude-3.5-sonnet';
   }
+
+  // Request summary log
+  const authMethod = (!req.authToken && !req.authType) ? 'provider-api-key' : (originalAuthType || 'none');
+  req.log?.info({
+    originalAuthType: originalAuthType,
+    finalAuthType: authMethod,
+    model: req.body.model,
+    sessionId: req.sessionId,
+    hasClientToken: !!originalAuthType,
+    oauthRequest: req.isOAuthRequest || false
+  }, 'Request processed with authentication strategy');
+
   return;
 };
 

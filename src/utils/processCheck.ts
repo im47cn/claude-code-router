@@ -1,8 +1,28 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { PID_FILE, REFERENCE_COUNT_FILE } from '../constants';
 import { readConfigFile } from '.';
 import find from 'find-process';
 import { execSync } from 'child_process'; // 引入 execSync 来执行命令行
+import lockfile from 'proper-lockfile';
+
+/**
+ * 安全地保存PID，使用文件锁定防止竞态条件
+ */
+export async function savePid(pid: number): Promise<void> {
+  try {
+    // 确保文件存在，然后锁定
+    writeFileSync(PID_FILE, pid.toString());
+    await lockfile.lock(PID_FILE);
+    // 再次写入以确保在锁定状态下写入
+    writeFileSync(PID_FILE, pid.toString());
+  } finally {
+    try {
+      await lockfile.unlock(PID_FILE);
+    } catch {
+      // 如果无法解锁，可能文件不存在，忽略错误
+    }
+  }
+}
 
 export async function isProcessRunning(pid: number): Promise<boolean> {
     try {
@@ -91,15 +111,10 @@ export function isServiceRunning(): boolean {
     }
 }
 
-export function savePid(pid: number) {
-    writeFileSync(PID_FILE, pid.toString());
-}
-
 export function cleanupPidFile() {
     if (existsSync(PID_FILE)) {
         try {
-            const fs = require('fs');
-            fs.unlinkSync(PID_FILE);
+            unlinkSync(PID_FILE);
         } catch (e) {
             // Ignore cleanup errors
         }

@@ -1,36 +1,45 @@
 export class SSEParserTransform extends TransformStream<string, any> {
     private buffer = '';
     private currentEvent: Record<string, any> = {};
+    private static decoder = new TextDecoder(); // 类级别单例
 
     constructor() {
         super({
             transform: (chunk: string, controller) => {
-                const decoder = new TextDecoder();
-                const text = decoder.decode(chunk);
-                this.buffer += text;
-                const lines = this.buffer.split('\n');
+                try {
+                    const text = SSEParserTransform.decoder.decode(chunk);
+                    this.buffer += text;
+                    const lines = this.buffer.split('\n');
 
-                // 保留最后一行（可能不完整）
-                this.buffer = lines.pop() || '';
+                    // 保留最后一行（可能不完整）
+                    this.buffer = lines.pop() || '';
 
-                for (const line of lines) {
-                    const event = this.processLine(line);
-                    if (event) {
-                        controller.enqueue(event);
+                    for (const line of lines) {
+                        const event = this.processLine(line);
+                        if (event) {
+                            controller.enqueue(event);
+                        }
                     }
+                } catch (error) {
+                    controller.error(error);
                 }
             },
             flush: (controller) => {
-                // 处理缓冲区中剩余的内容
-                if (this.buffer.trim()) {
-                    const events: any[] = [];
-                    this.processLine(this.buffer.trim(), events);
-                    events.forEach(event => controller.enqueue(event));
-                }
+                try {
+                    // 处理缓冲区中剩余的内容
+                    if (this.buffer.trim()) {
+                        const events: any[] = [];
+                        this.processLine(this.buffer.trim(), events);
+                        events.forEach(event => controller.enqueue(event));
+                    }
 
-                // 推送最后一个事件（如果有）
-                if (Object.keys(this.currentEvent).length > 0) {
-                    controller.enqueue(this.currentEvent);
+                    // 处理任何缓冲的剩余内容作为事件
+                    if (Object.keys(this.currentEvent).length > 0) {
+                        controller.enqueue(this.currentEvent);
+                        this.currentEvent = {}; // 清空当前事件
+                    }
+                } catch (error) {
+                    controller.error(error);
                 }
             }
         });
@@ -60,6 +69,8 @@ export class SSEParserTransform extends TransformStream<string, any> {
                 try {
                     this.currentEvent.data = JSON.parse(data);
                 } catch (e) {
+                    // 可选：添加调试日志
+                    console.debug(`SSE JSON parse failed for data: ${data.substring(0, 100)}...`);
                     this.currentEvent.data = { raw: data, error: 'JSON parse failed' };
                 }
             }

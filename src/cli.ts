@@ -10,11 +10,71 @@ import {
 } from "./utils/processCheck";
 import { runModelSelector } from "./utils/modelSelector"; // ADD THIS LINE
 import { activateCommand } from "./utils/activateCommand";
+import {
+  generateLoginUrl,
+  exchangeCode,
+  getOAuthStatus,
+  deleteCredentials,
+} from "./utils/oauth";
 import { version } from "../package.json";
-import { spawn, exec } from "child_process";
+import { spawn, execFile } from "child_process";
 import { PID_FILE, REFERENCE_COUNT_FILE } from "./constants";
 import fs, { existsSync, readFileSync } from "fs";
 import { join } from "path";
+
+/**
+ * 验证URL是否安全
+ */
+export function validateUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    // 只允许http和https协议
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      return false;
+    }
+    // 防止明显恶意字符
+    if (url.includes('"') || url.includes("'") || url.includes('&') || url.includes('|') || url.includes(';')) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 安全地打开默认浏览器中的URL
+ * 返回成功时解决的promise，失败时拒绝的promise
+ */
+function openBrowser(url: string): Promise<void> {
+  return new Promise(async (resolve, reject) => {
+    // 首先验证URL
+    if (!validateUrl(url)) {
+      reject(new Error(`无效或不安全的URL: ${url}`));
+      return;
+    }
+
+    const platform = process.platform;
+    if (platform === "win32") {
+      execFile("cmd", ["/c", "start", "", url], { timeout: 5000 }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    } else if (platform === "darwin") {
+      execFile("open", [url], { timeout: 5000 }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    } else if (platform === "linux") {
+      execFile("xdg-open", [url], { timeout: 5000 }, (error) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    } else {
+      reject(new Error("不支持的浏览器打开平台"));
+    }
+  });
+}
 
 const command = process.argv[2];
 
@@ -22,17 +82,21 @@ const HELP_TEXT = `
 Usage: ccr [command]
 
 Commands:
-  start         Start server
-  stop          Stop server
-  restart       Restart server
-  status        Show server status
-  statusline    Integrated statusline
-  code          Execute claude command
-  model         Interactive model selection and configuration
-  activate      Output environment variables for shell integration
-  ui            Open the web UI in browser
-  -v, version   Show version information
-  -h, help      Show help information
+  start              Start server
+  stop               Stop server
+  restart            Restart server
+  status             Show server status
+  statusline         Integrated statusline
+  code               Execute claude command
+  model              Interactive model selection and configuration
+  activate           Output environment variables for shell integration
+  ui                 Open the web UI in browser
+  login              Start OAuth login flow (opens browser)
+  login <code>       Exchange authorization code for tokens
+  login --status     Show OAuth status
+  logout             Remove OAuth credentials
+  -v, version        Show version information
+  -h, help           Show help information
 
 Example:
   ccr start
@@ -40,6 +104,8 @@ Example:
   ccr model
   eval "$(ccr activate)"  # Set environment variables globally
   ccr ui
+  ccr login            # Opens browser to authenticate
+  ccr login abc123     # Exchange code after browser auth
 `;
 
 async function waitForService(
@@ -70,7 +136,11 @@ async function main() {
       break;
     case "stop":
       try {
-        const pid = parseInt(readFileSync(PID_FILE, "utf-8"));
+        const pidStr = readFileSync(PID_FILE, "utf-8").trim();
+        const pid = parseInt(pidStr, 10);
+        if (isNaN(pid) || pid <= 0) {
+          throw new Error("Invalid PID in file");
+        }
         process.kill(pid);
         cleanupPidFile();
         if (existsSync(REFERENCE_COUNT_FILE)) {
@@ -127,6 +197,13 @@ async function main() {
       if (!isRunning) {
         console.log("Service not running, starting service...");
         const cliPath = join(__dirname, "cli.js");
+
+        // 验证cliPath安全性
+        if (!cliPath.startsWith(__dirname)) {
+          console.error("无效的CLI路径");
+          process.exit(1);
+        }
+
         const startProcess = spawn("node", [cliPath, "start"], {
           detached: true,
           stdio: "ignore",
@@ -172,6 +249,13 @@ async function main() {
       if (!isRunning) {
         console.log("Service not running, starting service...");
         const cliPath = join(__dirname, "cli.js");
+
+        // 验证cliPath安全性
+        if (!cliPath.startsWith(__dirname)) {
+          console.error("无效的CLI路径");
+          process.exit(1);
+        }
+
         const startProcess = spawn("node", [cliPath, "start"], {
           detached: true,
           stdio: "ignore",
@@ -221,6 +305,11 @@ async function main() {
             );
 
             // Try starting the service again
+            // 验证cliPath安全性
+            if (!cliPath.startsWith(__dirname)) {
+              console.error("无效的CLI路径");
+              process.exit(1);
+            }
             const restartProcess = spawn("node", [cliPath, "start"], {
               detached: true,
               stdio: "ignore",
@@ -261,30 +350,61 @@ async function main() {
 
       console.log(`Opening UI at ${uiUrl}`);
 
-      // Open URL in browser based on platform
-      const platform = process.platform;
-      let openCommand = "";
-
-      if (platform === "win32") {
-        // Windows
-        openCommand = `start ${uiUrl}`;
-      } else if (platform === "darwin") {
-        // macOS
-        openCommand = `open ${uiUrl}`;
-      } else if (platform === "linux") {
-        // Linux
-        openCommand = `xdg-open ${uiUrl}`;
-      } else {
-        console.error("Unsupported platform for opening browser");
+      // Open URL in browser (await to ensure proper exit code)
+      try {
+        await openBrowser(uiUrl);
+      } catch (error: any) {
+        console.error("Failed to open browser:", error.message);
         process.exit(1);
       }
-
-      exec(openCommand, (error) => {
-        if (error) {
-          console.error("Failed to open browser:", error.message);
+      break;
+    case "login":
+      const loginArg = process.argv[3];
+      if (loginArg === "--status") {
+        // Show OAuth status
+        const status = getOAuthStatus();
+        if (!status.hasCredentials) {
+          console.log("OAuth: Not logged in");
+          console.log("Run 'ccr login' to authenticate.");
+        } else {
+          console.log("OAuth: Logged in");
+          if (status.expiresAt != null) {
+            console.log(`Expires: ${new Date(status.expiresAt).toLocaleString()}`);
+          }
+          console.log(`Status: ${status.isExpired ? "Expired (will auto-refresh)" : "Valid"}`);
+        }
+      } else if (loginArg) {
+        // Exchange authorization code
+        console.log("Exchanging authorization code...");
+        const credentials = await exchangeCode(loginArg);
+        if (credentials) {
+          console.log("✅ OAuth login successful!");
+          console.log(`Token expires: ${new Date(credentials.expiresAt).toLocaleString()}`);
+        } else {
+          console.error("❌ OAuth login failed. Please try again.");
           process.exit(1);
         }
-      });
+      } else {
+        // Generate login URL and open browser
+        const { url } = generateLoginUrl();
+        console.log("\n🔐 OAuth Login\n");
+        console.log("Opening browser for authentication...\n");
+        console.log("If browser doesn't open, visit this URL:");
+        console.log(url);
+        console.log("\nAfter authorizing, you'll be redirected to a page showing an authorization code.");
+        console.log("Run: ccr login <code>\n");
+
+        // Open browser (don't exit on failure, user can manually visit URL)
+        try {
+          await openBrowser(url);
+        } catch {
+          console.log("Could not open browser automatically.");
+        }
+      }
+      break;
+    case "logout":
+      deleteCredentials();
+      console.log("✅ OAuth credentials removed.");
       break;
     case "-v":
     case "version":
@@ -293,8 +413,12 @@ async function main() {
     case "restart":
       // Stop the service if it's running
       try {
-        const pid = parseInt(readFileSync(PID_FILE, "utf-8"));
-        process.kill(pid);
+        const restartPidStr = readFileSync(PID_FILE, "utf-8").trim();
+        const restartPid = parseInt(restartPidStr, 10);
+        if (isNaN(restartPid) || restartPid <= 0) {
+          throw new Error("Invalid PID in file");
+        }
+        process.kill(restartPid);
         cleanupPidFile();
         if (existsSync(REFERENCE_COUNT_FILE)) {
           try {
@@ -312,6 +436,13 @@ async function main() {
       // Start the service again in the background
       console.log("Starting claude code router service...");
       const cliPath = join(__dirname, "cli.js");
+
+      // 验证cliPath安全性
+      if (!cliPath.startsWith(__dirname)) {
+        console.error("无效的CLI路径");
+        process.exit(1);
+      }
+
       const startProcess = spawn("node", [cliPath, "start"], {
         detached: true,
         stdio: "ignore",
@@ -335,4 +466,7 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// 只在直接运行此文件时执行main，不在导入时执行
+if (require.main === module) {
+  main().catch(console.error);
+}

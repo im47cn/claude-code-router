@@ -173,7 +173,12 @@
     "background": "gemini-cli,gemini-2.5-flash",
     "think": "gemini-cli,gemini-2.5-pro",
     "longContext": "gemini-cli,gemini-2.5-pro",
-    "webSearch": "gemini-cli,gemini-2.5-flash"
+    "webSearch": "gemini-cli,gemini-2.5-flash",
+    "frontend": "openrouter,google/gemini-3-pro-preview",
+    "backend": "deepseek,deepseek-chat",
+    "architect": "openrouter,anthropic/claude-sonnet-4",
+    "devops": "gemini-cli,gemini-2.5-pro",
+    "mobile": "openrouter,anthropic/claude-3.5-sonnet"
   },
   "NON_INTERACTIVE_MODE": false
 }

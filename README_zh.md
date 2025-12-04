@@ -53,7 +53,7 @@ npm install -g @musistudio/claude-code-router
 - **日志系统**: Claude Code Router 使用两个独立的日志系统：
   - **服务器级别日志**: HTTP 请求、API 调用和服务器事件使用 pino 记录在 `~/.claude-code-router/logs/` 目录中，文件名类似于 `ccr-*.log`
   - **应用程序级别日志**: 路由决策和业务逻辑事件记录在 `~/.claude-code-router/claude-code-router.log` 文件中
-- **`APIKEY`** (可选): 您可以设置一个密钥来进行身份验证。设置后，客户端请求必须在 `Authorization` 请求头 (例如, `Bearer your-secret-key`) 或 `x-api-key` 请求头中提供此密钥。例如：`"APIKEY": "your-secret-key"`。
+- **`APIKEY`** (可选): 您可以设置一个密钥来对 CCR 进行身份验证。设置后，客户端请求必须在 `x-api-key` 请求头中提供此密钥。注意：如果客户端提供了 OAuth 令牌（`Authorization: Bearer`），无论 `APIKEY` 配置如何，请求都会被允许通过。例如：`"APIKEY": "your-secret-key"`。
 - **`HOST`** (可选): 您可以设置服务的主机地址。如果未设置 `APIKEY`，出于安全考虑，主机地址将强制设置为 `127.0.0.1`，以防止未经授权的访问。例如：`"HOST": "0.0.0.0"`。
 - **`NON_INTERACTIVE_MODE`** (可选): 当设置为 `true` 时，启用与非交互式环境（如 GitHub Actions、Docker 容器或其他 CI/CD 系统）的兼容性。这会设置适当的环境变量（`CI=true`、`FORCE_COLOR=0` 等）并配置 stdin 处理，以防止进程在自动化环境中挂起。例如：`"NON_INTERACTIVE_MODE": true`。
 - **`Providers`**: 用于配置不同的模型提供商。
@@ -360,6 +360,57 @@ Transformers 允许您修改请求和响应负载，以确保与不同提供商 
 您还可以使用 `/model` 命令在 Claude Code 中动态切换模型：
 `/model provider_name,model_name`
 示例: `/model openrouter,anthropic/claude-3.5-sonnet`
+
+#### 认证配置（基于字符串）
+
+你可以使用简单的语法直接在模型字符串中配置认证策略，从而对不同路由使用不同的认证方法进行精细控制。
+
+**语法**：`provider,model;auth=<method>;fallback=<method>;subagent=<enable|disable>`
+
+**认证方法**：
+- `oauth`：使用 OAuth Bearer token（来自 Claude Code 认证）
+- `api-key`：使用 provider 的 API key
+- `none`：无认证
+
+**配置示例**：
+
+```json
+{
+  "Router": {
+    // 默认：OAuth + API key 备用
+    "default": "anthropic,claude-3-5-sonnet;auth=oauth,fallback=api-key",
+
+    // 后台：仅 API key（为子代理节省成本）
+    "background": "openrouter,claude-3-haiku;auth=api-key;subagent=disable",
+
+    // 思考：仅 OAuth（推理高安全性）
+    "think": "anthropic,claude-3-opus;auth=oauth",
+
+    // 长上下文：OAuth + 备用
+    "longContext": "anthropic,claude-3-opus;auth=oauth,fallback=api-key",
+
+    // 网络搜索：OAuth + 备用
+    "webSearch": "perplexity,pplx-70b-online;auth=oauth,fallback=api-key"
+  }
+}
+```
+
+**快捷语法**：
+- `;oauth` = `;auth=oauth,fallback=api-key`（OAuth + API key 备用）
+- `;auth=api-key` = 仅使用 API key
+- `;subagent=disable` = 为子代理禁用 OAuth 透传
+
+**默认行为**（未指定认证指令时）：
+- `default/think/longContext`：优先 OAuth，API key 备用
+- `webSearch/background/subagent`：仅 API key（成本控制）
+
+**认证流程**：
+1. 尝试主认证方法
+2. 失败后尝试备用方法
+3. 最终回退到任何可用的认证
+4. 子代理请求遵循 `subagent` 设置
+
+这种方法提供了最大的灵活性，同时配置开销最小，并保持与现有配置的完全向后兼容性。
 
 #### 自定义路由器
 
