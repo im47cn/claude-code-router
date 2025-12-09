@@ -80,6 +80,96 @@ function getTokenInfo(token: string) {
   };
 }
 
+/**
+ * Determine the route type for a request based on model selection logic
+ */
+const determineRouteType = (req: FastifyRequest): 'default' | 'think' | 'background' | 'webSearch' | 'longContext' => {
+  try {
+    // Check for explicit thinking flag
+    if ((req.body as any)?.thinking) {
+      return 'think';
+    }
+
+    // Check for model-specific routing
+    const model = (req.body as any)?.model;
+    if (model && typeof model === 'string') {
+      const lowerModel = model.toLowerCase();
+      if (lowerModel.includes('think') || lowerModel.includes('reasoning')) {
+        return 'think';
+      }
+      if (lowerModel.includes('background') || lowerModel.includes('haiku')) {
+        return 'background';
+      }
+      if (lowerModel.includes('search') || lowerModel.includes('perplexity')) {
+        return 'webSearch';
+      }
+      if (lowerModel.includes('long') || lowerModel.includes('context')) {
+        return 'longContext';
+      }
+    }
+
+    // Default route type
+    return 'default';
+  } catch (error) {
+    // Default to 'default' if route type cannot be determined
+    return 'default';
+  }
+};
+
+/**
+ * Detect subagent routing markers in request
+ */
+const detectSubagentMarkers = (req: FastifyRequest): {
+  hasRouterMarker: boolean;
+  hasModelMarker: boolean;
+  routerName?: string;
+  modelName?: string;
+} => {
+  const result = {
+    hasRouterMarker: false,
+    hasModelMarker: false,
+    routerName: undefined as string | undefined,
+    modelName: undefined as string | undefined
+  };
+
+  try {
+    const system = (req.body as any)?.system;
+    if (!Array.isArray(system) || system.length <= 1) {
+      return result;
+    }
+
+    const systemText = system[1]?.text;
+    if (typeof systemText !== 'string') {
+      return result;
+    }
+
+    // Detect router marker
+    const routerMatch = systemText.match(/<CCR-SUBAGENT-ROUTER>(.*?)<\/CCR-SUBAGENT-ROUTER>/s);
+    if (routerMatch) {
+      result.hasRouterMarker = true;
+      result.routerName = routerMatch[1]?.trim();
+    }
+
+    // Detect model marker
+    const modelMatch = systemText.match(/<CCR-SUBAGENT-MODEL>(.*?)<\/CCR-SUBAGENT-MODEL>/s);
+    if (modelMatch) {
+      result.hasModelMarker = true;
+      result.modelName = modelMatch[1]?.trim();
+    }
+  } catch (error) {
+    // Log error but don't fail authentication
+    const logger = (req as any).server?.logger;
+    if (logger?.warn) {
+      logger.warn({
+        error: error instanceof Error ? error.message : String(error),
+        url: req.url
+      }, 'Failed to detect subagent markers');
+    }
+  }
+
+  return result;
+};
+
 export const apiKeyAuth =
   (config: any) =>
   async (req: FastifyRequest, reply: FastifyReply) => {
@@ -119,24 +209,58 @@ export const apiKeyAuth =
     // Check for ClaudeMem requests (highest priority for auth override)
     // ClaudeMem system prompt pattern (case-insensitive)
     // Based on actual ClaudeMem system prompt: "You are a Claude-Mem, a specialized observer tool..."
-    const claudeMemPattern = 'you are a claude-mem';
+    const claudeMemPatterns = [
+      'you are a claude-mem',
+      'hello memory agent',
+      'memory agent.*observation',
+      'you do not have access to tools.*create observations',
+      'memory processing continued',
+      'claude-mem.*specialized observer tool',
+      'session tracking',
+      'memory logs',
+      'session_summary',
+      'claude-mem://',
+      'primary session',
+      'memory agent.*hello',
+      'observation.*session',
+      'context index',
+      'work investment'
+    ];
 
     const isClaudeMem = (() => {
       const messages = (req.body as any)?.messages;
       if (!validateMessageArray(messages)) return false;
 
-      for (const message of messages) {
-        if (typeof message.content === 'string') {
-          if (message.content.toLowerCase().includes(claudeMemPattern)) {
-            return true;
-          }
-        } else if (Array.isArray(message.content)) {
-          for (const contentPart of message.content) {
-            if (contentPart.type === 'text' &&
-                typeof (contentPart as any).text === 'string') {
-              if ((contentPart as any).text.toLowerCase().includes(claudeMemPattern)) {
-                return true;
+      // Check both messages and system for ClaudeMem/Memory Agent patterns
+      const contentToCheck = [
+        ...(messages || []),
+        ...((req.body as any)?.system || [])
+      ];
+
+      for (const content of contentToCheck) {
+        let textContent = '';
+
+        if (typeof content === 'string') {
+          textContent = content;
+        } else if (typeof content === 'object' && content !== null) {
+          if (typeof content.content === 'string') {
+            textContent = content.content;
+          } else if (typeof content.text === 'string') {
+            textContent = content.text;
+          } else if (Array.isArray(content.content)) {
+            for (const contentPart of content.content) {
+              if (contentPart.type === 'text' && typeof contentPart.text === 'string') {
+                textContent += ' ' + contentPart.text;
               }
+            }
+          }
+        }
+
+        if (textContent) {
+          const lowerText = textContent.toLowerCase();
+          for (const pattern of claudeMemPatterns) {
+            if (lowerText.includes(pattern) || new RegExp(pattern, 'i').test(lowerText)) {
+              return true;
             }
           }
         }
@@ -150,8 +274,11 @@ export const apiKeyAuth =
     // 3. CCR OAuth2 (shared OAuth token from CCR's own OAuth flow)
     // 4. CCR configured APIKEY validation (x-api-key header)
     //
-    // Note: Provider API Key for upstream requests is used when no OAuth is available
-    // and is handled in authHeaders.ts
+    // Note: For upstream requests (CCR to provider), Provider API Key is used as final fallback
+    // when no OAuth tokens are available. This is handled in authHeaders.ts, not here.
+
+    // Determine route type early for authentication decision making
+    const routeType = determineRouteType(req);
 
     // Start authentication process
     if (logger?.debug) {
@@ -160,7 +287,10 @@ export const apiKeyAuth =
         method: req.method,
         userAgent: req.headers['user-agent'],
         hasAuthHeader: !!req.headers['authorization'],
-        hasApiKeyHeader: !!req.headers['x-api-key']
+        hasApiKeyHeader: !!req.headers['x-api-key'],
+        routeType,
+        hasThinking: !!(req.body as any)?.thinking,
+        model: (req.body as any)?.model
       }, 'Starting authentication process');
     }
 
@@ -198,6 +328,70 @@ export const apiKeyAuth =
       return;
     }
 
+    // Priority 1.5: Subagent Markers - use Provider API Key (but preserve OAuth for think models)
+    const subagentMarkers = detectSubagentMarkers(req);
+    const hasSubagentMarkers = subagentMarkers.hasRouterMarker || subagentMarkers.hasModelMarker;
+
+    if (hasSubagentMarkers && routeType !== 'think') {
+      // Clear any client authentication tokens to force Provider API Key usage
+      const clientToken = (req as any).authToken;
+      const clientAuthType = (req as any).authType;
+
+      delete (req as any).authToken;
+      delete (req as any).authType;
+
+      // Store marker info for router processing
+      (req as any).subagentMarkers = subagentMarkers;
+
+      // Log subagent marker detection and auth switch
+      if (logger?.info) {
+        logger.info({
+          hasRouterMarker: subagentMarkers.hasRouterMarker,
+          hasModelMarker: subagentMarkers.hasModelMarker,
+          routerName: subagentMarkers.routerName,
+          modelName: subagentMarkers.modelName,
+          routeType,
+          originalAuthType: clientAuthType,
+          originalTokenPresent: !!clientToken,
+          newAuthType: 'provider-api-key',
+          url: req.url,
+          method: req.method,
+          priority: 'Priority_1_5_Subagent_Markers'
+        }, 'Subagent markers detected - switching from client auth to Provider API Key');
+      }
+
+      const duration = Date.now() - startTime;
+      if (logger?.debug) {
+        logger.debug({
+          authType: 'provider-api-key',
+          duration: `${duration}ms`,
+          hasRouterMarker: subagentMarkers.hasRouterMarker,
+          hasModelMarker: subagentMarkers.hasModelMarker,
+          routeType,
+          priority: 'Priority_1_5_Subagent_Markers'
+        }, 'Authentication completed');
+      }
+
+      return;
+    }
+
+    // Log why subagent markers didn't trigger Provider API Key
+    if (hasSubagentMarkers && routeType === 'think') {
+      if (logger?.info) {
+        logger.info({
+          hasRouterMarker: subagentMarkers.hasRouterMarker,
+          hasModelMarker: subagentMarkers.hasModelMarker,
+          routerName: subagentMarkers.routerName,
+          modelName: subagentMarkers.modelName,
+          routeType,
+          url: req.url,
+          method: req.method,
+          priority: 'Priority_1_5_Think_Model_Exception',
+          reason: 'Think model detected - preserving OAuth authentication instead of switching to Provider API Key'
+        }, 'Subagent markers detected but think model exception applied');
+      }
+    }
+
     const authHeader = req.headers["authorization"];
     const authHeaderValue = Array.isArray(authHeader) ? authHeader[0] : authHeader;
     // 安全地提取Bearer令牌并验证其非空（不存储中间结果）
@@ -217,12 +411,17 @@ export const apiKeyAuth =
           authType: 'client-oauth',
           tokenInfo,
           url: req.url,
-          method: req.method
+          method: req.method,
+          routeType,
+          hasThinking: !!(req.body as any)?.thinking,
+          model: (req.body as any)?.model
         }, 'Client OAuth2 token detected and attached');
       } else if (logger?.info) {
         logger.info({
           authType: 'client-oauth',
-          tokenLength: tokenInfo.length
+          tokenLength: tokenInfo.length,
+          routeType,
+          priority: 'Priority_2_Client_OAuth'
         }, 'Client OAuth2 authentication successful');
       }
 
@@ -238,12 +437,14 @@ export const apiKeyAuth =
           duration: `${duration}ms`,
           url: req.url,
           method: req.method,
+          routeType,
           priority: 'Priority_2_Client_OAuth'
         }, 'Client OAuth2 authentication successful');
       } else if (logger?.debug) {
         logger.debug({
           authType: 'client-oauth',
           duration: `${duration}ms`,
+          routeType,
           priority: 'Priority_2_Client_OAuth'
         }, 'Authentication completed');
       }

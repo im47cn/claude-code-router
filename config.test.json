@@ -1,0 +1,202 @@
+{
+  "LOG": true,
+  "LOG_LEVEL": "info",
+  "CLAUDE_PATH": "",
+  "HOST": "127.0.0.1",
+  "PORT": 3457,
+  "APIKEY": "sk-zcf-x-ccr",
+  "API_TIMEOUT_MS": "1800000",
+  "PROXY_URL": "",
+  "transformers": [],
+  "Providers": [
+    {
+      "name": "anthropic",
+      "api_key": "",
+      "models": [
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-5-20251101",
+        "claude-haiku-4-5-20251001"
+      ]
+    },
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "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",
+      "models": [
+        "google/gemini-3-pro-preview",
+        "google/gemini-2.5-pro",
+        "google/gemini-2.5-flash",
+        "anthropic/claude-opus-4.5",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-haiku-4.5",
+        "anthropic/claude-3.5-sonnet",
+        "anthropic/claude-3.7-sonnet:thinking",
+        "openai/gpt-5.1",
+        "openai/gpt-5.1-codex",
+        "openai/gpt-5.1-codex-mini",
+        "qwen/qwen3-coder",
+        "x-ai/grok-4.1-fast",
+        "x-ai/grok-code-fast-1",
+        "z-ai/glm-4.6",
+        "z-ai/glm-4.5-air"
+      ],
+      "transformer": {
+        "use": [
+          "openrouter"
+        ]
+      },
+      "tools": [{
+            "type": "code_execution_20250825",
+            "name": "code_execution"
+        }]
+    },
+    {
+      "name": "requesty",
+      "api_base_url": "https://router.requesty.ai/v1",
+      "api_key": "rqsty-sk-cfNSXKLiQO6QHQGyya+Kd4jCNtVnc0Qof+CmTy6xV9BDEuAWtaz09AWDWMv0WONRd8V7edbcWPWYpfEk07O/DvbfWRTet4Jnf5vIgYojHgs=",
+      "models": [
+        "policy/fast",
+        "policy/thinking"
+      ]
+    },
+    {
+      "name": "deepseek",
+      "api_base_url": "https://api.deepseek.com/chat/completions",
+      "api_key": "sk-2e5a3cc7978240df838b96ae775b2da3",
+      "models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "transformer": {
+        "use": [
+          "deepseek"
+        ],
+        "deepseek-chat": {
+          "use": ["tooluse"]
+        }
+      }
+    },
+    {
+      "name": "gemini",
+      "api_base_url": "https://generativelanguage.googleapis.com/v1beta/models/",
+      "api_key": "AIzaSyByIlBESkLVxp8z18v60sf2AmFhzJkZjqk",
+      "models": [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
+      ],
+      "transformer": {
+        "use": [
+          "gemini"
+        ]
+      }
+    },
+    {
+      "name": "zhipu",
+      "api_base_url": "https://api.z.ai/api/anthropic/v1/messages",
+      "api_key": "3dc5d8d80f304f6a8de392dbc08baa35.DpiggADGO8Z2ENC6",
+      "models": [
+        "glm-4.6",
+        "glm-4.5-air"
+      ],
+      "transformer": {
+        "use": [
+          "Anthropic"
+        ]
+      }
+    },
+    {
+      "name": "clubcdn",
+      "api_base_url": "https://clubcdn.383338.xyz",
+      "api_key": "sk-Fxwvqls48nYyK2zvxu6IQGv27PHqryhcL4FzkMSFCchxcTvx",
+      "models": [
+        "claude-sonnet-4-20250514"
+      ],
+      "transformer": {
+        "use": [],
+        "claude-sonnet-4-20250514": {
+          "use": [
+            "Anthropic"
+          ]
+        }
+      }
+    },
+    {
+      "name": "iflow",
+      "api_base_url": "https://apis.iflow.cn/v1/chat/completions",
+      "api_key": "sk-266eb725eea7d1904d28856372cfb79f",
+      "models": [
+        "qwen3-coder-plus",
+        "kimi-k2-0905",
+        "glm-4.5",
+        "glm-4.6",
+        "qwen3-max",
+        "deepseek-v3.1",
+        "qwen3-vl-plus"
+      ],
+      "transformer": {
+        "deepseek-v3.1": {
+          "use": [
+            [
+              "maxtoken",
+              {
+                "max_tokens": 8192
+              }
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "modelscope",
+      "api_base_url": "https://api-inference.modelscope.cn/v1/chat/completions",
+      "api_key": "ms-ad4f371c-18e7-4838-8318-c6e839568f88",
+      "models": [
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+        "Qwen/Qwen3-235B-A22B-Thinking-2507",
+        "ZhipuAI/GLM-4.5"
+      ],
+      "transformer": {
+        "use": [
+          [
+            "maxtoken",
+            {
+              "max_tokens": 65536
+            }
+          ]
+        ],
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct": {
+          "use": [
+            "enhancetool"
+          ]
+        },
+        "Qwen/Qwen3-235B-A22B-Thinking-2507": {
+          "use": [
+            "reasoning"
+          ]
+        }
+      }
+    }
+  ],
+  "StatusLine": {
+    "enabled": false,
+    "currentStyle": "default",
+    "default": {
+      "modules": []
+    },
+    "powerline": {
+      "modules": []
+    }
+  },
+  "Router": {
+    "default": "zhipu,glm-4.6",
+    "background": "zhipu,glm-4.5-air",
+    "think": "zhipu,glm-4.6",
+    "longContext": "zhipu,glm-4.6",
+    "longContextThreshold": 160000,
+    "webSearch": "openrouter,google/gemini-2.5-flash:online",
+    "image": "openrouter,google/gemini-2.5-flash",
+    "architect": "openrouter,openai/gpt-5.1",
+    "frontend": "openrouter,google/gemini-3-pro-preview"
+  },
+  "CUSTOM_ROUTER_PATH": ""
+}

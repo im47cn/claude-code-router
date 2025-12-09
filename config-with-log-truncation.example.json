@@ -1,0 +1,24 @@
+{
+  "Providers": {
+    "openrouter": {
+      "BASE_URL": "https://openrouter.ai/api/v1",
+      "APIKEY": "your-openrouter-api-key"
+    }
+  },
+  "Router": {
+    "default": "openrouter,anthropic/claude-3.5-sonnet"
+  },
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "LOG": true,
+  "LOG_LEVEL": "info",
+  
+  "LOG_TRUNCATE_SYSTEM": true,
+  "LOG_SYSTEM_MAX_LENGTH": 1000,
+  
+  "LOG_TRUNCATE_MESSAGES": true,
+  "LOG_MAX_MESSAGES": 5,
+  "LOG_MAX_MESSAGE_LENGTH": 200,
+  
+  "APIKEY": "your-ccr-api-key"
+}

@@ -142,6 +142,88 @@ async function run(options: RunOptions = {}) {
     ? parseInt(process.env.SERVICE_PORT)
     : port;
 
+  // Function to truncate system field for logging
+  const truncateSystemForLog = (system: any): any => {
+    if (!system) return system;
+    
+    const maxLength = (config as any).LOG_SYSTEM_MAX_LENGTH || 1000;
+    const enableTruncation = (config as any).LOG_TRUNCATE_SYSTEM !== false;
+    
+    if (!enableTruncation) return system;
+    
+    if (Array.isArray(system)) {
+      // Handle system array format: [{ type: 'text', text: '...' }]
+      return system.map(item => {
+        if (item?.type === 'text' && typeof item?.text === 'string' && item.text.length > maxLength) {
+          const originalLength = item.text.length;
+          return {
+            ...item,
+            text: item.text.substring(0, maxLength) + 
+              `\n\n... [SYSTEM_CONTENT_TRUNCATED_FOR_LOGGING: original length ${originalLength} characters, ${originalLength - maxLength} characters omitted] ...`
+          };
+        }
+        return item;
+      });
+    } else if (typeof system === 'string' && system.length > maxLength) {
+      const originalLength = system.length;
+      return system.substring(0, maxLength) + 
+        `\n\n... [SYSTEM_CONTENT_TRUNCATED_FOR_LOGGING: original length ${originalLength} characters, ${originalLength - maxLength} characters omitted] ...`;
+    }
+    
+    return system;
+  };
+
+  // Function to truncate messages field for logging to prevent huge log entries
+  const truncateMessagesForLog = (messages: any): any => {
+    if (!Array.isArray(messages)) return messages;
+    
+    const maxMessages = (config as any).LOG_MAX_MESSAGES || 5;
+    const maxMessageLength = (config as any).LOG_MAX_MESSAGE_LENGTH || 200;
+    const enableTruncation = (config as any).LOG_TRUNCATE_MESSAGES !== false;
+    
+    if (!enableTruncation) return messages;
+    
+    const truncatedMessages = messages.slice(0, maxMessages).map((msg: any) => {
+      if (msg?.content) {
+        if (typeof msg.content === 'string' && msg.content.length > maxMessageLength) {
+          const originalLength = msg.content.length;
+          return {
+            ...msg,
+            content: msg.content.substring(0, maxMessageLength) + 
+              `\n\n... [MESSAGE_CONTENT_TRUNCATED: original length ${originalLength} characters, ${originalLength - maxMessageLength} characters omitted] ...`
+          };
+        } else if (Array.isArray(msg.content)) {
+          // Handle content array format
+          return {
+            ...msg,
+            content: msg.content.map((item: any) => {
+              if (item?.type === 'text' && typeof item?.text === 'string' && item.text.length > maxMessageLength) {
+                const originalLength = item.text.length;
+                return {
+                  ...item,
+                  text: item.text.substring(0, maxMessageLength) + 
+                    `\n\n... [MESSAGE_CONTENT_TRUNCATED: original length ${originalLength} characters, ${originalLength - maxMessageLength} characters omitted] ...`
+                };
+              }
+              return item;
+            })
+          };
+        }
+      }
+      return msg;
+    });
+
+    // Add indicator if messages were truncated
+    if (messages.length > maxMessages) {
+      truncatedMessages.push({
+        role: 'system',
+        content: `[... ${messages.length - maxMessages} additional messages omitted for logging ...]`
+      });
+    }
+
+    return truncatedMessages;
+  };
+
   // Configure logger based on config settings
   const pad = num => (num > 9 ? "" : "0") + num;
   const generator = (time, index) => {
@@ -167,6 +249,27 @@ async function run(options: RunOptions = {}) {
             compress: false,
             maxSize: "50M"
           }),
+          serializers: {
+            req: (req: any) => ({
+              method: req.method,
+              url: req.url,
+              headers: req.headers,
+              // Truncate large fields for logging while preserving request integrity
+              body: req.body ? {
+                model: req.body.model,
+                max_tokens: req.body.max_tokens,
+                messages: req.body.messages ? truncateMessagesForLog(req.body.messages) : undefined,
+                system: req.body.system ? truncateSystemForLog(req.body.system) : undefined,
+                tools: req.body.tools ? req.body.tools.length : undefined,
+                stream: req.body.stream,
+                temperature: req.body.temperature
+              } : undefined
+            }),
+            res: (res: any) => ({
+              statusCode: res.statusCode,
+              headers: res.headers
+            })
+          }
         }
       : false;
 

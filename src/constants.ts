@@ -17,6 +17,9 @@ export const CLAUDE_PROJECTS_DIR = path.join(os.homedir(), ".claude", "projects"
 
 export const DEFAULT_CONFIG = {
   LOG: false,
+  LOG_LEVEL: "debug",
+  LOG_TRUNCATE_SYSTEM: true,
+  LOG_SYSTEM_MAX_LENGTH: 1000,
   OPENAI_API_KEY: "",
   OPENAI_BASE_URL: "",
   OPENAI_MODEL: "",

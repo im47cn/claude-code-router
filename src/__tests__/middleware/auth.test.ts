@@ -351,6 +351,522 @@ describe('apiKeyAuth middleware', () => {
           });
   });
 
+  describe('subagent marker detection (Priority 1.5)', () => {
+    it('should use provider API key when <CCR-SUBAGENT-ROUTER> is present', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' },
+            { type: 'text', text: '<CCR-SUBAGENT-ROUTER>frontend</CCR-SUBAGENT-ROUTER>Help me with something.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should clear client auth and use provider API key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+      expect((req as any).subagentMarkers.hasRouterMarker).toBe(true);
+      expect((req as any).subagentMarkers.routerName).toBe('frontend');
+    });
+
+    it('should use provider API key when <CCR-SUBAGENT-MODEL> is present', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          'x-api-key': 'test-api-key-12345',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' },
+            { type: 'text', text: '<CCR-SUBAGENT-MODEL>openrouter,anthropic/claude-3.5-sonnet</CCR-SUBAGENT-MODEL>Help me code.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      vi.mocked(oauthTokenShare.getToken).mockResolvedValue(null);
+
+      await middleware(req as any, reply);
+
+      // Should clear API key auth and use provider API key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+      expect((req as any).subagentMarkers.hasModelMarker).toBe(true);
+      expect((req as any).subagentMarkers.modelName).toBe('openrouter,anthropic/claude-3.5-sonnet');
+    });
+
+    it('should use provider API key when both markers are present', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' },
+            { type: 'text', text: '<CCR-SUBAGENT-ROUTER>backend</CCR-SUBAGENT-ROUTER><CCR-SUBAGENT-MODEL>deepseek,deepseek-chat</CCR-SUBAGENT-MODEL>Help me.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should clear client auth and use provider API key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+      expect((req as any).subagentMarkers.hasRouterMarker).toBe(true);
+      expect((req as any).subagentMarkers.hasModelMarker).toBe(true);
+      expect((req as any).subagentMarkers.routerName).toBe('backend');
+      expect((req as any).subagentMarkers.modelName).toBe('deepseek,deepseek-chat');
+    });
+
+    it('should NOT trigger for ClaudeMem requests (ClaudeMem has higher priority)', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a Claude-Mem, a specialized observer tool...' },
+            { type: 'text', text: '<CCR-SUBAGENT-ROUTER>frontend</CCR-SUBAGENT-ROUTER>Help me.' }
+          ],
+          messages: [
+            { role: 'user', content: 'You are a claude-mem specialized observer tool.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // ClaudeMem should take priority, not subagent markers
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+      expect((req as any).subagentMarkers).toBeUndefined();
+    });
+
+    // Memory Agent detection tests
+    it('should detect Memory Agent requests with "hello memory agent" pattern', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'Hello memory agent, you are continuing to observe the primary Claude session.'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent requests with "memory agent.*observation" pattern', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'memory agent observation: Create observations from what you observe'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent requests with "you do not have access to tools" pattern', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'You do not have access to tools. Create observations from what you observe.'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent requests with "memory processing continued" pattern', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'MEMORY PROCESSING CONTINUED'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent requests in system message', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            {
+              type: 'text',
+              text: 'Hello memory agent, you are continuing to observe the primary Claude session.'
+            }
+          ],
+          messages: [
+            { role: 'user', content: 'Process this data' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent in system message and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should NOT detect non-Memory Agent requests with similar keywords', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'I have a good memory of this project'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should NOT detect as Memory Agent, use OAuth
+      expect((req as any).authToken).toBe('client-oauth-token');
+      expect((req as any).authType).toBe('client-oauth');
+    });
+
+    // Tests based on actual log scenarios from ccr-20251204173425.log
+    it('should detect Memory Agent in complex context with system reminders', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: '<system-reminder>SessionStart:Callback hook success: Success</system-reminder>' },
+                { type: 'text', text: '<system-reminder>SessionStart hook additional context: # [claude-code-router-cc] recent context</system-reminder>' },
+                { type: 'text', text: 'Hello memory agent, you are continuing to observe the primary Claude session.' }
+              ]
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent despite complex structure and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent with observed session context', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'Hello memory agent, you are continuing to observe the primary Claude session.\n\n<observed_from_primary_session>\n  <user_request>hello world</user_request>\n  <requested_at>2025-12-04</requested_at>\n</observed_from_primary_session>\n\nYou do not have access to tools. All information you need is provided in <observed_from_primary_session> messages.'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent with context and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should detect Memory Agent in warmup scenarios', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a Claude agent, built on Anthropic\'s Claude Agent SDK.' },
+            { type: 'text', text: 'Hello memory agent, you are continuing to observe the primary Claude session.' }
+          ],
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'Warmup' }] }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent in system and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should NOT detect regular Claude Code requests as Memory Agent', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are Claude Code, Anthropic\'s official CLI for Claude.' },
+            { type: 'text', text: 'You are a software architect and planning specialist for Claude Code.' }
+          ],
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'Warmup' }] }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should NOT detect as Memory Agent, use OAuth
+      expect((req as any).authToken).toBe('client-oauth-token');
+      expect((req as any).authType).toBe('client-oauth');
+    });
+
+    it('should detect Memory Agent in multi-part content arrays', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: 'System context:' },
+                { type: 'text', text: 'Hello memory agent, continue observation.' },
+                { type: 'text', text: 'Additional context provided.' }
+              ]
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent in content array and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should handle Memory Agent detection with mixed case', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          messages: [
+            {
+              role: 'user',
+              content: 'HELLO MEMORY AGENT - you are continuing to observe'
+            }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect Memory Agent case-insensitively and use Provider API Key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+    });
+
+    it('should continue normal auth flow when no subagent markers are present', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' },
+            { type: 'text', text: 'Help me with this task.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should use normal client OAuth auth
+      expect((req as any).authToken).toBe('client-oauth-token');
+      expect((req as any).authType).toBe('client-oauth');
+      expect((req as any).subagentMarkers).toBeUndefined();
+    });
+
+    it('should handle malformed system gracefully', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: 'not-an-array'
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should fall back to normal auth when system is malformed
+      expect((req as any).authToken).toBe('client-oauth-token');
+      expect((req as any).authType).toBe('client-oauth');
+      expect((req as any).subagentMarkers).toBeUndefined();
+    });
+
+    it('should handle missing system[1].text gracefully', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should fall back to normal auth when system[1] is missing
+      expect((req as any).authToken).toBe('client-oauth-token');
+      expect((req as any).authType).toBe('client-oauth');
+      expect((req as any).subagentMarkers).toBeUndefined();
+    });
+
+    it('should handle malformed markers gracefully', async () => {
+      const config = createMockConfig();
+      const middleware = apiKeyAuth(config);
+      const req = createMockRequest({
+        headers: {
+          authorization: 'Bearer client-oauth-token',
+        },
+        body: {
+          system: [
+            { type: 'text', text: 'You are a helpful assistant.' },
+            { type: 'text', text: '<CCR-SUBAGENT-ROUTER><empty></CCR-SUBAGENT-ROUTER><CCR-SUBAGENT-MODEL><empty></CCR-SUBAGENT-MODEL>Help me.' }
+          ]
+        }
+      });
+      const reply = createMockReply();
+
+      await middleware(req as any, reply);
+
+      // Should detect markers and clear auth for provider API key
+      expect((req as any).authToken).toBeUndefined();
+      expect((req as any).authType).toBeUndefined();
+      expect((req as any).subagentMarkers.hasRouterMarker).toBe(true);
+      expect((req as any).subagentMarkers.hasModelMarker).toBe(true);
+    });
+  });
+
   describe('API key validation', () => {
     it('should reject wrong API key', async () => {
       const config = createMockConfig({ APIKEY: 'secret-key-123' });
