@@ -23,6 +23,7 @@ import JSON5 from "json5";
 import { IAgent } from "./agents/type";
 import agentsManager from "./agents";
 import { EventEmitter } from "node:events";
+import { SessionLoggerManager, DEFAULT_SESSION_LOG_CONFIG } from "./utils/sessionLogger";
 
 const event = new EventEmitter()
 
@@ -221,22 +222,31 @@ async function run(options: RunOptions = {}) {
       });
     }
 
-    return truncatedMessages;
+return truncatedMessages;
   };
 
+  // Initialize session logger manager
+  const sessionLogConfig = {
+    enabled: config.SESSION_LOG_ENABLED !== false,
+    retentionDays: config.SESSION_LOG_RETENTION_DAYS || 7,
+    maxFilesPerSession: config.SESSION_LOG_MAX_FILES_PER_SESSION || 5,
+    maxSizePerFile: config.SESSION_LOG_MAX_SIZE || '10M',
+    includeCommandName: config.SESSION_LOG_INCLUDE_COMMAND_NAME !== false
+  };
+  
+  const sessionLoggerManager = new SessionLoggerManager(sessionLogConfig);
+
   // Configure logger based on config settings
-  const pad = num => (num > 9 ? "" : "0") + num;
-  const generator = (time, index) => {
-    if (!time) {
-      time = new Date()
-    }
+  const pad = (num: number) => (num > 9 ? "" : "0") + num;
+  const generator = (time: number | Date, index?: number) => {
+    const date = typeof time === 'number' ? new Date(time) : (time || new Date());
+    
+    var month = date.getFullYear() + "" + pad(date.getMonth() + 1);
+    var day = pad(date.getDate());
 
-    var month = time.getFullYear() + "" + pad(time.getMonth() + 1);
-    var day = pad(time.getDate());
-    var hour = pad(time.getHours());
-    var minute = pad(time.getMinutes());
-
-    return `./logs/ccr-${month}${day}${hour}${minute}${pad(time.getSeconds())}${index ? `_${index}` : ''}.log`;
+    // For daily rotation, use daily format without time components
+    // Include index only when there are multiple files for the same day
+    return `./logs/ccr-${month}${day}${index ? `_${index}` : ''}.log`;
   };
   const loggerConfig =
     config.LOG !== false
@@ -244,10 +254,11 @@ async function run(options: RunOptions = {}) {
           level: config.LOG_LEVEL || "debug",
           stream: createStream(generator, {
             path: HOME_DIR,
-            maxFiles: 3,
+            maxFiles: 7, // Keep 7 days of daily logs
             interval: "1d",
             compress: false,
-            maxSize: "50M"
+            maxSize: "50M",
+            immutable: false // Allow rotation when size limit is reached
           }),
           serializers: {
             req: (req: any) => ({
@@ -287,6 +298,7 @@ async function run(options: RunOptions = {}) {
       ),
     },
     logger: loggerConfig,
+    sessionLoggerManager,
   });
 
   // Add global error handlers
@@ -355,7 +367,8 @@ async function run(options: RunOptions = {}) {
       }
       await router(req, reply, {
         config,
-        event
+        event,
+        sessionLoggerManager
       });
     }
   });

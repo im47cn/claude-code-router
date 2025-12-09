@@ -303,7 +303,10 @@ const getUseModel = async (
 };
 
 export const router = async (req: any, _res: any, context: any) => {
-  const { config, event } = context;
+  const { config, event, sessionLoggerManager } = context;
+
+  // Get session logger if available
+  const sessionLogger = sessionLoggerManager?.getSessionLogger(req);
 
   // Router marker detection and conditional routing (applies to all requests, not just OAuth)
   const routerName = detectOAuthRouterMarker(req.body?.system);
@@ -384,6 +387,8 @@ export const router = async (req: any, _res: any, context: any) => {
     config.REWRITE_SYSTEM_PROMPT &&
     system.length > 1 &&
     system[1] &&
+    typeof system[1] === 'object' &&
+    'text' in system[1] &&
     typeof system[1].text === 'string' &&
     system[1].text.includes("<env>")
   ) {
@@ -423,14 +428,27 @@ export const router = async (req: any, _res: any, context: any) => {
 
   // Request summary log
   const authMethod = (!req.authToken && !req.authType) ? 'provider-api-key' : (originalAuthType || 'none');
-  req.log?.info({
+  const logData = {
     originalAuthType: originalAuthType,
     finalAuthType: authMethod,
     model: req.body.model,
     sessionId: req.sessionId,
     hasClientToken: !!originalAuthType,
-    oauthRequest: req.isOAuthRequest || false
-  }, 'Request processed with authentication strategy');
+    oauthRequest: req.isOAuthRequest || false,
+    url: req.url,
+    method: req.method,
+    routerName: routerName,
+    messageCount: messages?.length || 0,
+    toolCount: tools?.length || 0
+  };
+
+  // Log to main logger
+  req.log?.info(logData, 'Request processed with authentication strategy');
+
+  // Log to session logger if available
+  if (sessionLogger) {
+    sessionLogger.info(logData, 'Request processed through router');
+  }
 
   return;
 };
@@ -438,7 +456,7 @@ export const router = async (req: any, _res: any, context: any) => {
 // 内存缓存，存储sessionId到项目名称的映射
 // null值表示之前已查找过但未找到项目
 // 使用LRU缓存，限制最大1000个条目
-const sessionProjectCache = new LRUCache<string, string | null>({
+const sessionProjectCache = new LRUCache<string, string>({
   max: 1000,
 });
 
@@ -447,7 +465,8 @@ export const searchProjectBySession = async (
 ): Promise<string | null> => {
   // 首先检查缓存
   if (sessionProjectCache.has(sessionId)) {
-    return sessionProjectCache.get(sessionId)!;
+    const cached = sessionProjectCache.get(sessionId);
+    return cached && cached !== '' ? cached : null;
   }
 
   try {
@@ -488,13 +507,13 @@ export const searchProjectBySession = async (
       }
     }
 
-    // 缓存未找到的结果（null值表示之前已查找过但未找到项目）
-    sessionProjectCache.set(sessionId, null);
+    // 缓存未找到的结果（使用特殊值表示未找到）
+    sessionProjectCache.set(sessionId, '');
     return null; // 没有找到匹配的项目
   } catch (error) {
     console.error("Error searching for project by session:", error);
-    // 出错时也缓存null结果，避免重复出错
-    sessionProjectCache.set(sessionId, null);
+    // 出错时也缓存结果，避免重复出错
+    sessionProjectCache.set(sessionId, '');
     return null;
   }
 };
